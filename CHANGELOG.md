@@ -1,3 +1,10 @@
+## [0.1.2](https://github.com/skwid138/opencode-council/compare/v0.1.1...v0.1.2) (2026-05-24)
+
+
+### Bug Fixes
+
+* expose server entrypoint for OpenCode plugin loader ([a58779e](https://github.com/skwid138/opencode-council/commit/a58779e7ee7dd738d6a6379aae44cf125185946c))
+
 ## [0.1.1](https://github.com/skwid138/opencode-council/compare/v0.1.0...v0.1.1) (2026-05-24)
 
 
