@@ -1,6 +1,6 @@
 {
   "name": "@skwid138/opencode-council",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-model adversarial review council plugin for opencode",
   "type": "module",
   "exports": {
@@ -9,8 +9,14 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": ["dist", "LICENSE", "README.md"],
-  "engines": { "node": ">=22" },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
@@ -29,10 +35,23 @@
     "@semantic-release/changelog": "^6.0.0",
     "@semantic-release/git": "^10.0.0"
   },
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "https://github.com/skwid138/opencode-council.git" },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skwid138/opencode-council.git"
+  },
   "homepage": "https://github.com/skwid138/opencode-council",
-  "bugs": { "url": "https://github.com/skwid138/opencode-council/issues" },
+  "bugs": {
+    "url": "https://github.com/skwid138/opencode-council/issues"
+  },
   "license": "MIT",
-  "keywords": ["opencode", "plugin", "council", "review", "multi-model"]
+  "keywords": [
+    "opencode",
+    "plugin",
+    "council",
+    "review",
+    "multi-model"
+  ]
 }
