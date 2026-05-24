@@ -16,7 +16,8 @@ vi.mock("@opencode-ai/plugin", () => {
   return { tool: toolFn };
 });
 
-import CouncilToolPlugin, {
+import {
+  CouncilToolPlugin,
   validateCouncilConfig,
   raceWithTimeout,
 } from "./index";
@@ -121,6 +122,36 @@ function createIds(session: SessionMocks, ids: string[]) {
   const queue = [...ids];
   session.create.mockImplementation(async () => ({ data: { id: queue.shift() } }));
 }
+
+describe("plugin module shape", () => {
+  it("default export has server property that is a function", async () => {
+    const mod = await import("./index");
+
+    expect(mod.default).toHaveProperty("server");
+    expect(typeof mod.default.server).toBe("function");
+  });
+
+  it("server function returns hooks with tool.council_review", async () => {
+    const mod = await import("./index");
+    const hooks = await mod.default.server(
+      createContext(createSessionMocks()) as never,
+      { council: validCouncil() } as never,
+    );
+
+    expect(hooks).toHaveProperty("tool");
+    expect(hooks.tool).toHaveProperty("council_review");
+  });
+});
+
+describe("package.json exports", () => {
+  it("exposes ./server export pointing to dist/index.js", () => {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, "../package.json"), "utf8"),
+    );
+
+    expect(pkg.exports["./server"]).toEqual({ import: "./dist/index.js" });
+  });
+});
 
 describe("raceWithTimeout", () => {
   it("returns a value when the promise resolves before the timeout", async () => {

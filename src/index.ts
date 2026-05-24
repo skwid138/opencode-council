@@ -559,4 +559,6 @@ Use when you need adversarial review from multiple models. The tool returns the 
   };
 };
 
-export default CouncilToolPlugin;
+export { CouncilToolPlugin };
+
+export default { server: CouncilToolPlugin };
