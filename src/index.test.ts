@@ -18,9 +18,16 @@ vi.mock("@opencode-ai/plugin", () => {
 
 import {
   CouncilToolPlugin,
+  parseCouncilConfig,
   validateCouncilConfig,
   raceWithTimeout,
 } from "./index";
+import {
+  AGGREGATOR_PERMISSION,
+  AGGREGATOR_PROMPT,
+  REVIEWER_PERMISSION,
+  REVIEWER_PROMPT,
+} from "./prompts";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
@@ -143,6 +150,47 @@ describe("plugin module shape", () => {
   });
 });
 
+describe("config hook bundled agents", () => {
+  it("injects bundled agents when reviewer and aggregator are not user-specified", async () => {
+    const hooks = (await CouncilToolPlugin(
+      createContext(createSessionMocks()) as never,
+      { council: { models: [MODEL_A, MODEL_B] } } as never,
+    )) as unknown as { config: (config: Record<string, unknown>) => Promise<void> };
+    const config: Record<string, unknown> = {};
+
+    await hooks.config(config);
+
+    expect(config.agent).toEqual({
+      "council-plugin-reviewer": {
+        description: "Council plugin adversarial code reviewer",
+        mode: "subagent",
+        hidden: true,
+        prompt: REVIEWER_PROMPT,
+        permission: REVIEWER_PERMISSION,
+      },
+      "council-plugin-aggregator": {
+        description: "Council plugin structural aggregator",
+        mode: "subagent",
+        hidden: true,
+        prompt: AGGREGATOR_PROMPT,
+        permission: AGGREGATOR_PERMISSION,
+      },
+    });
+  });
+
+  it("does not inject bundled agents when reviewer and aggregator are user-specified", async () => {
+    const hooks = (await CouncilToolPlugin(
+      createContext(createSessionMocks()) as never,
+      { council: validCouncil() } as never,
+    )) as unknown as { config: (config: Record<string, unknown>) => Promise<void> };
+    const config: Record<string, unknown> = { agent: { existing: { mode: "subagent" } } };
+
+    await hooks.config(config);
+
+    expect(config.agent).toEqual({ existing: { mode: "subagent" } });
+  });
+});
+
 describe("package.json exports", () => {
   it("exposes ./server export pointing to dist/index.js", () => {
     const pkg = JSON.parse(
@@ -171,33 +219,19 @@ describe("raceWithTimeout", () => {
   });
 });
 
-describe("validateCouncilConfig", () => {
-  it("throws when reviewer is missing", () => {
-    expect(() =>
-      validateCouncilConfig({ council: { aggregator: "agg", models: [MODEL_A, MODEL_B] } }),
-    ).toThrow("council.reviewer is required");
+describe("parseCouncilConfig", () => {
+  it("defaults reviewer and aggregator to bundled agent names", () => {
+    const config = parseCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } });
+
+    expect(config.reviewer).toBe("council-plugin-reviewer");
+    expect(config.aggregator).toBe("council-plugin-aggregator");
   });
 
-  it("throws when reviewer is an empty string", () => {
-    expect(() =>
-      validateCouncilConfig({
-        council: { reviewer: " ", aggregator: "agg", models: [MODEL_A, MODEL_B] },
-      }),
-    ).toThrow("council.reviewer is required");
-  });
+  it("keeps the validateCouncilConfig export as a backward-compatible alias", () => {
+    const config = validateCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } });
 
-  it("throws when aggregator is missing", () => {
-    expect(() =>
-      validateCouncilConfig({ council: { reviewer: "reviewer", models: [MODEL_A, MODEL_B] } }),
-    ).toThrow("council.aggregator is required");
-  });
-
-  it("throws when aggregator is an empty string", () => {
-    expect(() =>
-      validateCouncilConfig({
-        council: { reviewer: "reviewer", aggregator: " ", models: [MODEL_A, MODEL_B] },
-      }),
-    ).toThrow("council.aggregator is required");
+    expect(config.reviewer).toBe("council-plugin-reviewer");
+    expect(config.aggregator).toBe("council-plugin-aggregator");
   });
 
   it("throws when models are missing", () => {
@@ -360,7 +394,10 @@ describe("aggregator threshold", () => {
     expect(session.prompt).toHaveBeenLastCalledWith(
       expect.objectContaining({
         path: { id: "aggregator-session" },
-        body: expect.objectContaining({ agent: "test-aggregator" }),
+        body: expect.objectContaining({
+          agent: "test-aggregator",
+          tools: expect.objectContaining({ bash: false, read: false, council_review: false }),
+        }),
       }),
     );
     expect(abortIds(session)).toEqual([
@@ -372,6 +409,25 @@ describe("aggregator threshold", () => {
 });
 
 describe("child session permissions", () => {
+  it("omits session-level permissions for bundled agents without explicit overrides", async () => {
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "bundled-session" } })
+      .mockResolvedValueOnce({ error: "create failed" })
+      .mockResolvedValueOnce({ error: "retry create failed" });
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
+    const execute = await createExecute(session, { models: [MODEL_A, MODEL_B] });
+
+    await execute({ prompt: "review this" }, { sessionID: "parent-session" });
+
+    for (const [input] of session.create.mock.calls as unknown as Array<[
+      { body: Record<string, unknown> },
+    ]>) {
+      expect(input.body).not.toHaveProperty("permission");
+    }
+  });
+
   it("passes bash allow and deny rules from the workspace opencode config", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
     fs.writeFileSync(
@@ -409,6 +465,45 @@ describe("child session permissions", () => {
         }),
       }),
     );
+  });
+
+  it("passes explicit reviewer and aggregator permission overrides at session level", async () => {
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockResolvedValue({});
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") })
+      .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
+    const execute = await createExecute(session, {
+      models: [MODEL_A, MODEL_B],
+      reviewer_permission: {
+        bash: "deny",
+        read: "allow",
+        question: "ask",
+      },
+      aggregator_permission: { "*": "deny" },
+    });
+
+    await execute({ prompt: "review this" }, { sessionID: "parent-session" });
+
+    const createCalls = session.create.mock.calls as unknown as Array<[
+      { body: Record<string, unknown> },
+    ]>;
+    expect(createCalls[0][0].body.permission).toEqual([
+      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "read", pattern: "*", action: "allow" },
+    ]);
+    expect(createCalls[1][0].body.permission).toEqual([
+      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "read", pattern: "*", action: "allow" },
+    ]);
+    expect(createCalls[2][0].body.permission).toEqual([
+      { permission: "*", pattern: "*", action: "deny" },
+    ]);
   });
 });
 
