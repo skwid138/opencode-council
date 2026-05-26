@@ -1,3 +1,11 @@
+# [0.3.0](https://github.com/skwid138/opencode-council/compare/v0.2.0...v0.3.0) (2026-05-26)
+
+
+### Features
+
+* add external_directory permission and nested config support ([edd68d7](https://github.com/skwid138/opencode-council/commit/edd68d757451f69c74711e650ac0ff2dc1264d41))
+* add write:deny to bundled reviewer permissions ([4b94dcf](https://github.com/skwid138/opencode-council/commit/4b94dcfc62b9efce406c23c157b9fd9faf731e16))
+
 # [0.2.0](https://github.com/skwid138/opencode-council/compare/v0.1.2...v0.2.0) (2026-05-26)
 
 
