@@ -24,7 +24,9 @@ Requires `@opencode-ai/plugin ^1.15.0` as a peer dependency.
 
 ## Configuration
 
-Add to your `opencode.json`:
+Add the plugin to your `opencode.json`. The only required council option is a `models` array with at least two entries; the plugin injects bundled reviewer and aggregator agents automatically when you do not specify your own.
+
+Minimal config:
 
 ```json
 {
@@ -33,12 +35,34 @@ Add to your `opencode.json`:
       "@skwid138/opencode-council",
       {
         "council": {
-          "reviewer": "my-reviewer",
-          "aggregator": "my-aggregator",
+          "models": [
+            { "providerID": "openai", "modelID": "gpt-5.5" },
+            { "providerID": "github-copilot", "modelID": "claude-opus-4.6" }
+          ]
+        }
+      }
+    ]
+  ]
+}
+```
+
+Full config with all options:
+
+```json
+{
+  "plugin": [
+    [
+      "@skwid138/opencode-council",
+      {
+        "council": {
           "models": [
             { "providerID": "openai", "modelID": "gpt-5.5" },
             { "providerID": "github-copilot", "modelID": "claude-opus-4.6" }
           ],
+          "reviewer": "my-reviewer",
+          "aggregator": "my-aggregator",
+          "reviewer_permission": { "bash": "deny" },
+          "aggregator_permission": { "*": "deny" },
           "aggregator_model": { "providerID": "openai", "modelID": "gpt-5.5" },
           "timeouts": {
             "councillor_ms": 180000,
@@ -57,27 +81,34 @@ Add to your `opencode.json`:
 
 | Field | Description |
 |-------|-------------|
-| `council.reviewer` | Name of the opencode agent to use as each reviewer |
-| `council.aggregator` | Name of the opencode agent to use as the aggregator |
 | `council.models` | Array of 2+ model configs (`providerID` + `modelID`) to fan out to |
 
 ### Optional fields
 
 | Field | Default | Description |
 |-------|---------|-------------|
+| `council.reviewer` | `council-plugin-reviewer` | Name of the opencode agent to use as each reviewer |
+| `council.aggregator` | `council-plugin-aggregator` | Name of the opencode agent to use as the aggregator |
+| `council.reviewer_permission` | Bundled agent permission, or inherited rules for custom agents | Session-level permission override for reviewer child sessions. Use only `allow` or `deny` values. |
+| `council.aggregator_permission` | Bundled agent permission, or inherited rules for custom agents | Session-level permission override for the aggregator child session. Use only `allow` or `deny` values. |
 | `council.aggregator_model` | First available model | Specific model for the aggregator agent |
 | `council.timeouts.councillor_ms` | `180000` (3 min) | Timeout for each reviewer's first attempt |
 | `council.timeouts.councillor_retry_ms` | `90000` (90s) | Timeout for automatic retry on first failure |
 | `council.timeouts.aggregator_ms` | `60000` (60s) | Timeout for the aggregation step |
 | `council.timeouts.hard_cap_ms` | `360000` (6 min) | Absolute maximum wall time for the entire operation |
 
-## Agent setup
+## Bundled and custom agents
 
-The `reviewer` and `aggregator` fields reference opencode agent names defined in your config (`~/.config/opencode/agent/` or `.opencode/agent/`). These names must match agents you've created — the plugin does not ship its own.
+If `reviewer` or `aggregator` is omitted, the plugin injects hidden `mode: "subagent"` bundled agents into `config.agent` during opencode startup:
 
-**Reviewer** — An adversarial review agent. Its job is to find problems with the code or plan it receives. Design its system prompt for critical analysis, not helpfulness. Write access is not required (though not enforced by the plugin — reviewer sessions inherit your permission rules). The same reviewer agent is used for all models in the `models` array; model diversity comes from the fan-out, not from multiple agent definitions.
+- `council-plugin-reviewer` — an adversarial reviewer that tiers findings as Must Address, Should Address, or Unrelated Observations and returns APPROVE / REVISE / REJECT.
+- `council-plugin-aggregator` — a structural aggregator that deduplicates reviewer responses by agreement level without issuing its own verdict.
 
-**Aggregator** — A synthesis agent. Its job is to structurally combine multiple reviewer responses into a unified summary. The plugin runs the aggregator with all tools disabled, so its prompt should focus on structural synthesis rather than independent analysis. You do not need to restrict tools in the agent definition — the plugin handles that.
+If you specify `reviewer` or `aggregator`, that name must reference an opencode agent defined in your config (`~/.config/opencode/agent/` or `.opencode/agent/`). Custom agents fully replace the corresponding bundled agent.
+
+**Reviewer** — An adversarial review agent. Its job is to find problems with the code or plan it receives. Design its system prompt for critical analysis, not helpfulness. The same reviewer agent is used for all models in the `models` array; model diversity comes from the fan-out, not from multiple agent definitions.
+
+**Aggregator** — A synthesis agent. Its job is to structurally combine multiple reviewer responses into a unified summary. The plugin runs the aggregator prompt with all tools disabled, so its prompt should focus on structural synthesis rather than independent analysis.
 
 For working examples of reviewer and aggregator agent definitions, see:
 - [config-opencode](https://github.com/skwid138/config-opencode) — personal opencode config with council agents
@@ -105,8 +136,10 @@ The plugin registers a single tool:
 
 ## Security
 
-- Child sessions inherit bash permission rules from your `opencode.json` config, with a catch-all deny as fallback.
-- The aggregator runs with all tools disabled (read-only synthesis).
+- Bundled reviewer and aggregator permissions are defined on the injected agents and contain no `ask` values.
+- Custom reviewer and aggregator sessions keep the existing child-session bash rules workaround unless you provide explicit `reviewer_permission` or `aggregator_permission` overrides.
+- Explicit permission overrides are applied at session level and should use only `allow` or `deny` values.
+- The aggregator prompt runs with all tools disabled as defense-in-depth.
 - Sessions are aborted after use; server-side TTL handles edge cases.
 
 ## Known Issues & Limitations
@@ -120,11 +153,12 @@ When a councillor session triggers a bash command not on the allow-list, the ope
 
 **Root cause:** The opencode server uses separate in-memory permission service instances for the plugin SDK client vs. the TUI listener. Permission replies from either surface land on a different instance than the one holding the pending request, so they're silently dropped.
 
-**Workaround (already implemented):** This plugin injects a permission ruleset into every child session that mirrors your `opencode.json` bash allow-list and appends a catch-all `deny`. Councillors never trigger `ask` prompts — unknown commands fail fast with a `PermissionDeniedError` (which the LLM handles gracefully) instead of hanging.
+**Workaround (already implemented):** Bundled agents are injected with permissions that contain no `ask` values. Custom agent child sessions receive a session-level ruleset that mirrors your `opencode.json` bash allow-list and appends a catch-all `deny`, unless you provide an explicit permission override. Councillors never trigger `ask` prompts — unknown commands fail fast with a `PermissionDeniedError` (which the LLM handles gracefully) instead of hanging.
 
 **Implications for consumers:**
-- Your `opencode.json` `permission.bash` rules are automatically read and applied to child sessions
-- Commands not explicitly allowed will be denied (not prompted)
+- Bundled agents work without requiring you to create reviewer or aggregator agents
+- Custom-agent child sessions still read your `opencode.json` `permission.bash` rules automatically
+- Commands not explicitly allowed by the custom-agent workaround will be denied (not prompted)
 - If you add new bash allow rules to your config, councillor sessions pick them up on next invocation
 - Once the upstream bug is fixed, this workaround becomes redundant but harmless
 
