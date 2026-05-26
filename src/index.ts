@@ -9,11 +9,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { tool, type Plugin, type PluginOptions } from "@opencode-ai/plugin";
+import {
+  AGGREGATOR_PERMISSION,
+  AGGREGATOR_PROMPT,
+  REVIEWER_PERMISSION,
+  REVIEWER_PROMPT,
+} from "./prompts";
 
 const COUNCILLOR_TIMEOUT_MS = 180_000;
 const COUNCILLOR_RETRY_TIMEOUT_MS = 90_000;
 const AGGREGATOR_TIMEOUT_MS = 60_000;
 const HARD_CAP_MS = 360_000;
+const BUNDLED_REVIEWER_AGENT = "council-plugin-reviewer";
+const BUNDLED_AGGREGATOR_AGENT = "council-plugin-aggregator";
 
 type TimeoutConfig = {
   councillor_ms: number;
@@ -32,6 +40,8 @@ type CouncilConfig = {
   aggregator: string;
   models: ModelConfig[];
   aggregator_model: ModelConfig | null;
+  reviewer_permission: Record<string, string> | null;
+  aggregator_permission: Record<string, string> | null;
   timeouts: TimeoutConfig;
 };
 
@@ -127,6 +137,42 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function councilOptions(raw: unknown): Record<string, unknown> {
+  if (!isPlainObject(raw)) return {};
+  return isPlainObject(raw.council) ? raw.council : raw;
+}
+
+function optionalAgentName(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : fallback;
+}
+
+function hasUserSpecifiedAgent(source: Record<string, unknown>, key: string): boolean {
+  const value = source[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function readPermissionOverride(value: unknown): Record<string, string> | null {
+  if (!isPlainObject(value)) return null;
+
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] =>
+      typeof entry[1] === "string" &&
+      (entry[1] === "allow" || entry[1] === "deny"),
+  );
+
+  return entries.length > 0 ? Object.fromEntries(entries) : {};
+}
+
+function permissionConfigToRuleset(config: Record<string, string>): PermissionRuleset {
+  return Object.entries(config).map(([permission, action]) => ({
+    permission,
+    pattern: "*",
+    action: action as "allow" | "deny",
+  }));
+}
+
 function catchAllDenyRuleset(): PermissionRuleset {
   return [{ permission: "bash", pattern: "*", action: "deny" }];
 }
@@ -163,26 +209,8 @@ function readTimeoutMs(
   return Math.min(HARD_CAP_MS, Math.max(1, Math.round(raw)));
 }
 
-export function validateCouncilConfig(raw: unknown): CouncilConfig {
-  const source = isPlainObject(raw)
-    ? isPlainObject(raw.council)
-      ? raw.council
-      : raw
-    : {};
-
-  if (
-    typeof source.reviewer !== "string" ||
-    source.reviewer.trim().length === 0
-  ) {
-    throw new Error("council.reviewer is required");
-  }
-
-  if (
-    typeof source.aggregator !== "string" ||
-    source.aggregator.trim().length === 0
-  ) {
-    throw new Error("council.aggregator is required");
-  }
+export function parseCouncilConfig(raw: unknown): CouncilConfig {
+  const source = councilOptions(raw);
 
   if (!Array.isArray(source.models)) {
     throw new Error("council.models is required");
@@ -200,10 +228,12 @@ export function validateCouncilConfig(raw: unknown): CouncilConfig {
   const timeoutSource = isPlainObject(source.timeouts) ? source.timeouts : {};
 
   return {
-    reviewer: source.reviewer,
-    aggregator: source.aggregator,
+    reviewer: optionalAgentName(source.reviewer, BUNDLED_REVIEWER_AGENT),
+    aggregator: optionalAgentName(source.aggregator, BUNDLED_AGGREGATOR_AGENT),
     models,
     aggregator_model: aggregatorModel,
+    reviewer_permission: readPermissionOverride(source.reviewer_permission),
+    aggregator_permission: readPermissionOverride(source.aggregator_permission),
     timeouts: {
       councillor_ms: readTimeoutMs(
         timeoutSource,
@@ -224,6 +254,8 @@ export function validateCouncilConfig(raw: unknown): CouncilConfig {
     },
   };
 }
+
+export { parseCouncilConfig as validateCouncilConfig };
 
 function modelLabel(model: ModelConfig): string {
   return `${model.providerID}/${model.modelID}`;
@@ -312,7 +344,10 @@ function formatFailureSummary(failures: CouncillorFailure[]): string {
 }
 
 const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
-  const councilConfig = validateCouncilConfig(options);
+  const rawCouncilOptions = councilOptions(options);
+  const userSpecifiedReviewer = hasUserSpecifiedAgent(rawCouncilOptions, "reviewer");
+  const userSpecifiedAggregator = hasUserSpecifiedAgent(rawCouncilOptions, "aggregator");
+  const councilConfig = parseCouncilConfig(options);
 
   async function parentDirectory(sessionID: string): Promise<string> {
     const parentSession = await ctx.client.session
@@ -324,13 +359,16 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   async function createChildSession(
     parentSessionID: string,
     title: string,
+    permission?: PermissionRuleset,
   ): Promise<string> {
+    const body: Record<string, unknown> = {
+      parentID: parentSessionID,
+      title,
+    };
+    if (permission) body.permission = permission;
+
     const createResult = await ctx.client.session.create({
-      body: {
-        parentID: parentSessionID,
-        permission: buildPermissionRuleset(ctx.directory),
-        title,
-      },
+      body,
       query: { directory: await parentDirectory(parentSessionID) },
     } as Parameters<typeof ctx.client.session.create>[0]) as {
       data?: { id?: string };
@@ -347,6 +385,20 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     }
 
     return sessionID;
+  }
+
+  function reviewerSessionPermission(): PermissionRuleset | undefined {
+    if (councilConfig.reviewer_permission) {
+      return permissionConfigToRuleset(councilConfig.reviewer_permission);
+    }
+    return userSpecifiedReviewer ? buildPermissionRuleset(ctx.directory) : undefined;
+  }
+
+  function aggregatorSessionPermission(): PermissionRuleset | undefined {
+    if (councilConfig.aggregator_permission) {
+      return permissionConfigToRuleset(councilConfig.aggregator_permission);
+    }
+    return userSpecifiedAggregator ? buildPermissionRuleset(ctx.directory) : undefined;
   }
 
   async function promptAndExtract(input: {
@@ -404,6 +456,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
           sessionID = await createChildSession(
             input.parentSessionID,
             `council: ${label} attempt ${input.attempt}`,
+            reviewerSessionPermission(),
           );
 
           return await promptAndExtract({
@@ -467,6 +520,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
           sessionID = await createChildSession(
             input.parentSessionID,
             "council: aggregator synthesis",
+            aggregatorSessionPermission(),
           );
 
           return await promptAndExtract({
@@ -530,6 +584,30 @@ ${formatFailureSummary(failures)}`;
   }
 
   return {
+    config: async (config: Record<string, unknown>) => {
+      config.agent ??= {};
+      const agents = config.agent as Record<string, unknown>;
+
+      if (!userSpecifiedReviewer) {
+        agents[BUNDLED_REVIEWER_AGENT] = {
+          description: "Council plugin adversarial code reviewer",
+          mode: "subagent",
+          hidden: true,
+          prompt: REVIEWER_PROMPT,
+          permission: REVIEWER_PERMISSION,
+        };
+      }
+
+      if (!userSpecifiedAggregator) {
+        agents[BUNDLED_AGGREGATOR_AGENT] = {
+          description: "Council plugin structural aggregator",
+          mode: "subagent",
+          hidden: true,
+          prompt: AGGREGATOR_PROMPT,
+          permission: AGGREGATOR_PERMISSION,
+        };
+      }
+    },
     tool: {
       council_review: tool({
         description: `Fan out a review prompt to the configured council of reviewers in parallel, then ask an aggregator to structurally aggregate the responses.
