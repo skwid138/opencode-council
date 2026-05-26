@@ -33,8 +33,8 @@ Add to your `opencode.json`:
       "@skwid138/opencode-council",
       {
         "council": {
-          "reviewer": "saruman",
-          "aggregator": "elrond",
+          "reviewer": "my-reviewer",
+          "aggregator": "my-aggregator",
           "models": [
             { "providerID": "openai", "modelID": "gpt-5.5" },
             { "providerID": "github-copilot", "modelID": "claude-opus-4.6" }
@@ -70,6 +70,18 @@ Add to your `opencode.json`:
 | `council.timeouts.councillor_retry_ms` | `90000` (90s) | Timeout for automatic retry on first failure |
 | `council.timeouts.aggregator_ms` | `60000` (60s) | Timeout for the aggregation step |
 | `council.timeouts.hard_cap_ms` | `360000` (6 min) | Absolute maximum wall time for the entire operation |
+
+## Agent setup
+
+The `reviewer` and `aggregator` fields reference opencode agent names defined in your config (`~/.config/opencode/agent/` or `.opencode/agent/`). These names must match agents you've created — the plugin does not ship its own.
+
+**Reviewer** — An adversarial review agent. Its job is to find problems with the code or plan it receives. Design its system prompt for critical analysis, not helpfulness. Write access is not required (though not enforced by the plugin — reviewer sessions inherit your permission rules). The same reviewer agent is used for all models in the `models` array; model diversity comes from the fan-out, not from multiple agent definitions.
+
+**Aggregator** — A synthesis agent. Its job is to structurally combine multiple reviewer responses into a unified summary. The plugin runs the aggregator with all tools disabled, so its prompt should focus on structural synthesis rather than independent analysis. You do not need to restrict tools in the agent definition — the plugin handles that.
+
+For working examples of reviewer and aggregator agent definitions, see:
+- [config-opencode](https://github.com/skwid138/config-opencode) — personal opencode config with council agents
+- [ai-dev-bootstrap-mac](https://github.com/skwid138/ai-dev-bootstrap-mac) — similar agent setup in a bootstrap config
 
 ## How it works
 
