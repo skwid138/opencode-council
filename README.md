@@ -61,7 +61,17 @@ Full config with all options:
           ],
           "reviewer": "my-reviewer",
           "aggregator": "my-aggregator",
-          "reviewer_permission": { "bash": "deny" },
+          "reviewer_permission": {
+            "bash": {
+              "*": "allow",
+              "sudo *": "deny",
+              "git push --force*": "deny"
+            },
+            "external_directory": {
+              "~/code/*": "allow",
+              "~/secrets/*": "deny"
+            }
+          },
           "aggregator_permission": { "*": "deny" },
           "aggregator_model": { "providerID": "openai", "modelID": "gpt-5.5" },
           "timeouts": {
@@ -89,8 +99,8 @@ Full config with all options:
 |-------|---------|-------------|
 | `council.reviewer` | `council-plugin-reviewer` | Name of the opencode agent to use as each reviewer |
 | `council.aggregator` | `council-plugin-aggregator` | Name of the opencode agent to use as the aggregator |
-| `council.reviewer_permission` | Bundled agent permission, or inherited rules for custom agents | Session-level permission override for reviewer child sessions. Use only `allow` or `deny` values. |
-| `council.aggregator_permission` | Bundled agent permission, or inherited rules for custom agents | Session-level permission override for the aggregator child session. Use only `allow` or `deny` values. |
+| `council.reviewer_permission` | Catch-all `bash`/`external_directory` allows plus workspace inherited rules | Extra session-level reviewer rules. Values may be flat (`"bash": "deny"`) or nested pattern maps (`"bash": { "sudo *": "deny" }`). Use only `allow` or `deny`; `ask` entries are stripped. |
+| `council.aggregator_permission` | none | Optional session-level aggregator rules. No workspace inheritance or catch-all allows are applied to the aggregator. Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_model` | First available model | Specific model for the aggregator agent |
 | `council.timeouts.councillor_ms` | `180000` (3 min) | Timeout for each reviewer's first attempt |
 | `council.timeouts.councillor_retry_ms` | `90000` (90s) | Timeout for automatic retry on first failure |
@@ -109,6 +119,33 @@ If you specify `reviewer` or `aggregator`, that name must reference an opencode 
 **Reviewer** — An adversarial review agent. Its job is to find problems with the code or plan it receives. Design its system prompt for critical analysis, not helpfulness. The same reviewer agent is used for all models in the `models` array; model diversity comes from the fan-out, not from multiple agent definitions.
 
 **Aggregator** — A synthesis agent. Its job is to structurally combine multiple reviewer responses into a unified summary. The plugin runs the aggregator prompt with all tools disabled, so its prompt should focus on structural synthesis rather than independent analysis.
+
+### Permission override shape
+
+`reviewer_permission` and `aggregator_permission` accept the same nested shape as opencode permission maps:
+
+```json
+{
+  "reviewer_permission": {
+    "read": "allow",
+    "bash": {
+      "*": "allow",
+      "sudo *": "deny",
+      "git push --force*": "deny"
+    },
+    "external_directory": {
+      "~/code/*": "allow",
+      "~/secrets/*": "deny"
+    }
+  }
+}
+```
+
+Flat strings become a `*` pattern. Nested objects are emitted in object key order; opencode uses last-match-wins permission evaluation, so put broad patterns first and narrower patterns later.
+
+Reviewer overrides are appended after the plugin's catch-all allows and after inherited workspace `bash` / `external_directory` rules, so they can tighten reviewer sessions by adding later `deny` rules. Allow-only overrides do not narrow access; because the workaround starts with broad allows, use explicit `deny` rules for restrictions.
+
+Aggregator overrides are used only when explicitly configured. The aggregator never inherits workspace permissions and never receives the reviewer catch-all allows.
 
 For working examples of reviewer and aggregator agent definitions, see:
 - [config-opencode](https://github.com/skwid138/config-opencode) — personal opencode config with council agents
@@ -137,9 +174,12 @@ The plugin registers a single tool:
 ## Security
 
 - Bundled reviewer and aggregator permissions are defined on the injected agents and contain no `ask` values.
-- Custom reviewer and aggregator sessions keep the existing child-session bash rules workaround unless you provide explicit `reviewer_permission` or `aggregator_permission` overrides.
-- Explicit permission overrides are applied at session level and should use only `allow` or `deny` values.
+- Reviewer child sessions always receive session-level catch-all allows for `bash` and `external_directory`, then inherited workspace `bash` / `external_directory` `allow` and `deny` rules, then explicit `reviewer_permission` overrides.
+- The reviewer catch-all `bash` allow is an intentional security trade-off for the [anomalyco/opencode#28037](https://github.com/anomalyco/opencode/issues/28037) workaround. It prevents unanswerable child-session permission prompts from hanging the TUI. Tighten custom reviewer sessions by adding later `deny` rules in `reviewer_permission`.
+- `external_directory` has no catch-all deny. The session starts with a catch-all allow to neutralize `ask`, then applies inherited workspace denies and explicit reviewer denies.
+- Explicit permission overrides are applied at session level and should use only `allow` or `deny` values. Any `ask` entries are stripped with a warning because child sessions cannot prompt interactively.
 - The aggregator prompt runs with all tools disabled as defense-in-depth.
+- The aggregator never receives workspace permission inheritance or reviewer catch-all allows. If you need aggregator session rules, set `aggregator_permission` explicitly.
 - Sessions are aborted after use; server-side TTL handles edge cases.
 
 ## Known Issues & Limitations
@@ -153,13 +193,14 @@ When a councillor session triggers a bash command not on the allow-list, the ope
 
 **Root cause:** The opencode server uses separate in-memory permission service instances for the plugin SDK client vs. the TUI listener. Permission replies from either surface land on a different instance than the one holding the pending request, so they're silently dropped.
 
-**Workaround (already implemented):** Bundled agents are injected with permissions that contain no `ask` values. Custom agent child sessions receive a session-level ruleset that mirrors your `opencode.json` bash allow-list and appends a catch-all `deny`, unless you provide an explicit permission override. Councillors never trigger `ask` prompts — unknown commands fail fast with a `PermissionDeniedError` (which the LLM handles gracefully) instead of hanging.
+**Workaround (already implemented):** Bundled agents are injected with permissions that contain no `ask` values. Reviewer child sessions receive a session-level ruleset with catch-all `allow` entries for `bash` and `external_directory`, followed by inherited workspace `allow` / `deny` rules and explicit reviewer overrides. Councillors never trigger `ask` prompts; configure later `deny` patterns in `reviewer_permission` to restrict risky commands or paths.
 
 **Implications for consumers:**
 - Bundled agents work without requiring you to create reviewer or aggregator agents
-- Custom-agent child sessions still read your `opencode.json` `permission.bash` rules automatically
-- Commands not explicitly allowed by the custom-agent workaround will be denied (not prompted)
-- If you add new bash allow rules to your config, councillor sessions pick them up on next invocation
+- Custom reviewer sessions read your parent workspace `opencode.json` `permission.bash` and `permission.external_directory` rules automatically
+- Commands and external paths are broadly allowed by the workaround unless workspace rules or explicit reviewer overrides deny them later
+- If you need stricter custom reviewer behavior, define `reviewer_permission` with explicit deny patterns such as `"sudo *": "deny"` or `"~/secrets/*": "deny"`
+- If you add new bash or external-directory rules to your config, councillor sessions pick them up on next invocation
 - Once the upstream bug is fixed, this workaround becomes redundant but harmless
 
 ## License
