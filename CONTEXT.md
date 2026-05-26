@@ -29,7 +29,7 @@ The list of `{ providerID, modelID }` pairs that councillors fan out to. Each mo
 _Avoid_: Reviewer models, councillor models
 
 **Permission override**:
-User-specified permissions (`reviewer_permission`, `aggregator_permission`) that merge over bundled agent defaults.
+User-specified permissions (`reviewer_permission`, `aggregator_permission`) that layer on top of the active agent's permissions, whether bundled or user-specified. Applied as the highest-priority rules in last-match-wins evaluation.
 _Avoid_: Permission config, custom permissions
 
 ## Relationships
@@ -37,7 +37,7 @@ _Avoid_: Permission config, custom permissions
 - A **council_review** invocation spawns one **councillor** per entry in the **models array**.
 - Each **councillor** executes the **reviewer agent** (bundled or user-specified).
 - The **aggregator agent** receives all councillor responses and produces deduplicated findings.
-- **Permission overrides** merge over **bundled agent** defaults; user-specified agents bypass bundled agents entirely.
+- **Permission overrides** layer on top of the active agent's permissions (bundled or user-specified) as the highest-priority rules.
 
 ## Example dialogue
 
@@ -45,7 +45,7 @@ _Avoid_: Permission config, custom permissions
 > **Domain expert:** "No — user-specified agents fully override bundled agents. The plugin only injects bundled agents when the config omits `reviewer` or `aggregator`."
 
 > **Dev:** "Can I use `reviewer_permission` to add permissions to my custom saruman agent?"
-> **Domain expert:** "No — permission overrides only apply to bundled agents. If you specify a custom agent, configure its permissions in the agent definition itself."
+> **Domain expert:** "Yes — `reviewer_permission` layers on top of saruman's own permissions as highest-priority rules. This lets you tighten or loosen permissions for the council context without editing the agent definition."
 
 ## Flagged ambiguities
 
