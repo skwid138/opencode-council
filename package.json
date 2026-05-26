@@ -1,6 +1,6 @@
 {
   "name": "@skwid138/opencode-council",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Multi-model adversarial review council plugin for opencode",
   "type": "module",
   "exports": {

@@ -1,3 +1,11 @@
+# [0.2.0](https://github.com/skwid138/opencode-council/compare/v0.1.2...v0.2.0) (2026-05-26)
+
+
+### Features
+
+* add bundled reviewer and aggregator prompts and permissions ([dee89a9](https://github.com/skwid138/opencode-council/commit/dee89a904f3f8e62022d9c44f97a82c6dd46f75d))
+* inject bundled default agents via config hook ([1e3d0cc](https://github.com/skwid138/opencode-council/commit/1e3d0ccc1e6713b29b0bd8cdebf775d064f7f803))
+
 ## [0.1.2](https://github.com/skwid138/opencode-council/compare/v0.1.1...v0.1.2) (2026-05-24)
 
 
