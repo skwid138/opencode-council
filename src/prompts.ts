@@ -128,6 +128,7 @@ export const REVIEWER_PERMISSION = {
   grep: "allow",
   list: "allow",
   edit: "deny",
+  write: "deny",
   bash: "allow",
   task: "deny",
   question: "deny",
