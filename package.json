@@ -29,12 +29,12 @@
     "@opencode-ai/plugin": "^1.15.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.15.4",
-    "@opencode-ai/sdk": "1.15.4",
-    "@types/node": "^25.9.1",
+    "@opencode-ai/plugin": "^1.15.0",
+    "@opencode-ai/sdk": "^1.15.0",
+    "@types/node": "^22.0.0",
     "semantic-release": "^25.0.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.14"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   },
   "publishConfig": {
     "access": "public"
