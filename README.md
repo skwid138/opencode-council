@@ -1,5 +1,7 @@
 # @skwid138/opencode-council
 
+[![npm](https://img.shields.io/npm/v/@skwid138/opencode-council)](https://npmjs.com/package/@skwid138/opencode-council) [![CI](https://github.com/skwid138/opencode-council/actions/workflows/ci.yml/badge.svg)](https://github.com/skwid138/opencode-council/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Multi-model adversarial review plugin for [opencode](https://opencode.ai)**
 
 Sends the same review prompt to multiple LLMs in parallel, then aggregates their responses into a single structured synthesis. Designed for adversarial code review workflows where diverse model perspectives catch issues that a single model misses.
@@ -13,6 +15,19 @@ A single reviewer model has blind spots. By fanning out the same prompt to 2+ mo
 - **Structured output** — an aggregator synthesizes responses without injecting its own verdict
 
 If fewer than 2 reviewers respond (timeouts, errors), the tool returns an error string so the calling agent can gracefully fall back to a single reviewer.
+
+## When to use
+
+**Good use cases:**
+- Pre-merge code review where catching subtle bugs justifies the extra latency
+- Architecture and design document review
+- Security-sensitive changes where multiple perspectives reduce risk
+- Any review where you want structured disagreement, not just a single opinion
+
+**Not ideal for:**
+- Quick formatting or lint-only checks (overkill for the latency cost)
+- Real-time interactive workflows where sub-second response matters
+- Tasks where all models would give identical answers (e.g., simple factual lookups)
 
 ## Install
 
@@ -170,6 +185,35 @@ The plugin registers a single tool:
 | `prompt` | `string` | The complete review prompt to send to each reviewer |
 
 **Returns:** The aggregator's structural synthesis, or an error string if fewer than 2 reviewers responded.
+
+## Example output
+
+A typical aggregated response:
+
+```
+┌─────────────────────────────────────────────────┐
+│ Council Review — 2 of 2 reviewers responded     │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│ VERDICT: REVISE                                 │
+│                                                 │
+│ ▸ Must Address (agreed by 2/2):                 │
+│   • Missing null check on `user.preferences`   │
+│     before destructuring (line 42)             │
+│   • SQL query uses string interpolation —      │
+│     switch to parameterized query              │
+│                                                 │
+│ ▸ Should Address (1/2 flagged):                │
+│   • Function `processData` exceeds 80 lines — │
+│     consider extracting validation logic       │
+│                                                 │
+│ ▸ Unrelated Observations:                      │
+│   • Unused import `lodash` on line 3           │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+*Output format depends on the aggregator agent. The bundled aggregator produces Markdown with tiered findings.*
 
 ## Security
 
