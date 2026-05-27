@@ -76,6 +76,7 @@ Full config with all options:
           ],
           "reviewer": "my-reviewer",
           "aggregator": "my-aggregator",
+          "debug": false,
           "reviewer_permission": {
             "bash": {
               "*": "allow",
@@ -92,8 +93,8 @@ Full config with all options:
           "timeouts": {
             "councillor_ms": 180000,
             "councillor_retry_ms": 90000,
-            "aggregator_ms": 60000,
-            "hard_cap_ms": 360000
+            "aggregator_ms": 120000,
+            "hard_cap_ms": 420000
           }
         }
       }
@@ -114,13 +115,35 @@ Full config with all options:
 |-------|---------|-------------|
 | `council.reviewer` | `council-plugin-reviewer` | Name of the opencode agent to use as each reviewer |
 | `council.aggregator` | `council-plugin-aggregator` | Name of the opencode agent to use as the aggregator |
+| `council.debug` | `false` | Enable structured debug logs through `ctx.client.app.log()` |
 | `council.reviewer_permission` | Catch-all `bash`/`external_directory` allows plus workspace inherited rules | Extra session-level reviewer rules. Values may be flat (`"bash": "deny"`) or nested pattern maps (`"bash": { "sudo *": "deny" }`). Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_permission` | none | Optional session-level aggregator rules. No workspace inheritance or catch-all allows are applied to the aggregator. Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_model` | First available model | Specific model for the aggregator agent |
 | `council.timeouts.councillor_ms` | `180000` (3 min) | Timeout for each reviewer's first attempt |
 | `council.timeouts.councillor_retry_ms` | `90000` (90s) | Timeout for automatic retry on first failure |
-| `council.timeouts.aggregator_ms` | `60000` (60s) | Timeout for the aggregation step |
-| `council.timeouts.hard_cap_ms` | `360000` (6 min) | Absolute maximum wall time for the entire operation |
+| `council.timeouts.aggregator_ms` | `120000` (2 min) | Timeout for the aggregation step. This starts after the councillor phase completes, so the aggregator gets a fresh clock. |
+| `council.timeouts.hard_cap_ms` | computed (`420000` with defaults) | Absolute maximum wall time for the entire operation. By default this is `councillor_ms + councillor_retry_ms + aggregator_ms + 30000`. |
+
+### Timeout behavior
+
+Council review uses three timeout layers:
+
+1. Each councillor attempt gets `councillor_ms`.
+2. A failed or timed-out councillor gets one retry with `councillor_retry_ms`.
+3. The aggregator gets a fresh `aggregator_ms` clock after the councillor phase completes.
+
+The outer `hard_cap_ms` is a safety net around the whole operation. When omitted, it is computed from the resolved phase timeouts plus a 30-second buffer. With defaults, that is `180000 + 90000 + 120000 + 30000 = 420000` (7 minutes).
+
+If you explicitly set `hard_cap_ms`, the plugin honors it exactly. If the explicit hard cap is smaller than the computed phase budget, the plugin emits a structured warning but does not shrink the inner phase timeouts.
+
+### Debug logging
+
+Structured debug logging can be enabled in either of two ways:
+
+- Set `COUNCIL_DEBUG=1` in the environment before starting opencode.
+- Set `"debug": true` in the plugin's `council` config.
+
+Logs are emitted through opencode's app logger as `ctx.client.app.log({ body: { service: "council-plugin", level, message, extra } })`. Debug logs include councillor start/end, retry triggers, aggregator start/end, timeout events, and hard-cap triggers. Warnings, including stripped `ask` permissions and undersized explicit hard caps, also use the same structured logger.
 
 ## Bundled and custom agents
 

@@ -32,12 +32,25 @@ _Avoid_: Reviewer models, councillor models
 User-specified permissions (`reviewer_permission`, `aggregator_permission`) that layer on top of the active agent's permissions, whether bundled or user-specified. Applied as the highest-priority rules in last-match-wins evaluation.
 _Avoid_: Permission config, custom permissions
 
+**Structured log**:
+Plugin diagnostics written via `ctx.client.app.log()` to opencode's log system. TUI-safe and persisted to `~/.local/share/opencode/log/`.
+_Avoid_: console output, stderr logging
+
+**Phase timeout**:
+The individual timeout governing one phase of the council operation (councillor attempt, councillor retry, aggregator). Independent of the hard cap.
+_Avoid_: step timeout, inner timeout
+
+**Computed hard cap**:
+The default hard cap derived from `councillor + retry + aggregator + 30s buffer` when no explicit `hard_cap_ms` is configured.
+_Avoid_: auto timeout, dynamic cap
+
 ## Relationships
 
 - A **council_review** invocation spawns one **councillor** per entry in the **models array**.
 - Each **councillor** executes the **reviewer agent** (bundled or user-specified).
 - The **aggregator agent** receives all councillor responses and produces deduplicated findings.
 - **Permission overrides** layer on top of the active agent's permissions (bundled or user-specified) as the highest-priority rules.
+- The **hard cap** wraps the entire operation as a safety net; **phase timeouts** govern individual phases independently with fresh clocks.
 
 ## Example dialogue
 
