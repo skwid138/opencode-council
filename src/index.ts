@@ -18,10 +18,15 @@ import {
 
 const COUNCILLOR_TIMEOUT_MS = 180_000;
 const COUNCILLOR_RETRY_TIMEOUT_MS = 90_000;
-const AGGREGATOR_TIMEOUT_MS = 60_000;
-const HARD_CAP_MS = 360_000;
+const AGGREGATOR_TIMEOUT_MS = 120_000;
+const DEFAULT_HARD_CAP_MS = COUNCILLOR_TIMEOUT_MS + COUNCILLOR_RETRY_TIMEOUT_MS + AGGREGATOR_TIMEOUT_MS + 30_000;
 const BUNDLED_REVIEWER_AGENT = "council-plugin-reviewer";
 const BUNDLED_AGGREGATOR_AGENT = "council-plugin-aggregator";
+
+type CouncilPluginOptions = PluginOptions & {
+  council?: Record<string, unknown>;
+  debug?: boolean;
+};
 
 type TimeoutConfig = {
   councillor_ms: number;
@@ -40,6 +45,7 @@ type PermissionOverrideConfig = Record<string, string | Record<string, string>>;
 type CouncilConfig = {
   reviewer: string;
   aggregator: string;
+  debug: boolean;
   models: ModelConfig[];
   aggregator_model: ModelConfig | null;
   reviewer_permission: PermissionOverrideConfig | null;
@@ -63,6 +69,8 @@ type CouncillorFailure = {
   model: ModelConfig;
   error: string;
 };
+
+type WarningLogger = (message: string, extra?: Record<string, unknown>) => void;
 
 const AGGREGATOR_TOOLS = {
   "chrome-devtools": false,
@@ -159,13 +167,16 @@ function isPermissionAction(value: unknown): value is "allow" | "deny" {
   return value === "allow" || value === "deny";
 }
 
-function warnAskStripped(scope: string): void {
-  console.warn(
+function warnAskStripped(scope: string, warn: (msg: string) => void): void {
+  warn(
     `Stripping ask permission override for ${scope}; child sessions cannot prompt interactively (anomalyco/opencode#28037)`,
   );
 }
 
-function readPermissionOverride(value: unknown): PermissionOverrideConfig | null {
+function readPermissionOverride(
+  value: unknown,
+  warn: (msg: string) => void,
+): PermissionOverrideConfig | null {
   if (!isPlainObject(value)) return null;
 
   const result: PermissionOverrideConfig = {};
@@ -177,7 +188,7 @@ function readPermissionOverride(value: unknown): PermissionOverrideConfig | null
     }
 
     if (actionOrPatterns === "ask") {
-      warnAskStripped(permission);
+      warnAskStripped(permission, warn);
       continue;
     }
 
@@ -188,7 +199,7 @@ function readPermissionOverride(value: unknown): PermissionOverrideConfig | null
       if (isPermissionAction(action)) {
         patterns[pattern] = action;
       } else if (action === "ask") {
-        warnAskStripped(`${permission}.${pattern}`);
+        warnAskStripped(`${permission}.${pattern}`, warn);
       }
     }
 
@@ -218,8 +229,12 @@ function permissionConfigToRuleset(config: PermissionOverrideConfig): Permission
   return ruleset;
 }
 
-function warnWorkspaceAskStripped(permission: string, pattern: string): void {
-  console.warn(
+function warnWorkspaceAskStripped(
+  permission: string,
+  pattern: string,
+  warn: (msg: string) => void,
+): void {
+  warn(
     `Stripping ask permission from workspace ${permission}.${pattern}; child sessions cannot prompt interactively (anomalyco/opencode#28037)`,
   );
 }
@@ -227,6 +242,7 @@ function warnWorkspaceAskStripped(permission: string, pattern: string): void {
 function workspacePatternRules(
   permission: "bash" | "external_directory",
   value: unknown,
+  warn: (msg: string) => void,
 ): PermissionRuleset {
   if (!isPlainObject(value)) return [];
 
@@ -236,13 +252,16 @@ function workspacePatternRules(
       ruleset.push({ permission, pattern, action });
     } else if (action === "ask") {
       // Strip ask values — child sessions cannot prompt interactively (anomalyco/opencode#28037).
-      warnWorkspaceAskStripped(permission, pattern);
+      warnWorkspaceAskStripped(permission, pattern, warn);
     }
   }
   return ruleset;
 }
 
-function buildReviewerRuleset(directory: string | undefined): PermissionRuleset {
+function buildReviewerRuleset(
+  directory: string | undefined,
+  warn: (msg: string) => void,
+): PermissionRuleset {
   // Temporary #28037 workaround — prevents ask prompts that hang TUI in child sessions.
   // Only bash and external_directory default to ask in opencode; other tools default to allow.
   const catchAllAllows: PermissionRuleset = [
@@ -261,8 +280,8 @@ function buildReviewerRuleset(directory: string | undefined): PermissionRuleset 
 
     return [
       ...catchAllAllows,
-      ...workspacePatternRules("bash", bash),
-      ...workspacePatternRules("external_directory", externalDirectory),
+      ...workspacePatternRules("bash", bash, warn),
+      ...workspacePatternRules("external_directory", externalDirectory, warn),
     ];
   } catch {
     return catchAllAllows;
@@ -276,10 +295,13 @@ function readTimeoutMs(
 ): number {
   const raw = source[key];
   if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
-  return Math.min(HARD_CAP_MS, Math.max(1, Math.round(raw)));
+  return Math.max(1, Math.round(raw));
 }
 
-export function parseCouncilConfig(raw: unknown): CouncilConfig {
+export function parseCouncilConfig(
+  raw: unknown,
+  warn: WarningLogger = () => {},
+): CouncilConfig {
   const source = councilOptions(raw);
 
   if (!Array.isArray(source.models)) {
@@ -296,31 +318,54 @@ export function parseCouncilConfig(raw: unknown): CouncilConfig {
     : null;
 
   const timeoutSource = isPlainObject(source.timeouts) ? source.timeouts : {};
+  const councillorMs = readTimeoutMs(
+    timeoutSource,
+    "councillor_ms",
+    COUNCILLOR_TIMEOUT_MS,
+  );
+  const councillorRetryMs = readTimeoutMs(
+    timeoutSource,
+    "councillor_retry_ms",
+    COUNCILLOR_RETRY_TIMEOUT_MS,
+  );
+  const aggregatorMs = readTimeoutMs(
+    timeoutSource,
+    "aggregator_ms",
+    AGGREGATOR_TIMEOUT_MS,
+  );
+  const computedHardCapMs = councillorMs + councillorRetryMs + aggregatorMs + 30_000;
+  const hasExplicitHardCap =
+    typeof timeoutSource.hard_cap_ms === "number" &&
+    Number.isFinite(timeoutSource.hard_cap_ms);
+  const hardCapMs = readTimeoutMs(
+    timeoutSource,
+    "hard_cap_ms",
+    hasExplicitHardCap ? DEFAULT_HARD_CAP_MS : computedHardCapMs,
+  );
+
+  if (hasExplicitHardCap && hardCapMs < computedHardCapMs) {
+    warn("Configured hard_cap_ms is below computed phase timeout budget; honoring explicit hard cap", {
+      configured_hard_cap_ms: hardCapMs,
+      computed_hard_cap_ms: computedHardCapMs,
+      councillor_ms: councillorMs,
+      councillor_retry_ms: councillorRetryMs,
+      aggregator_ms: aggregatorMs,
+    });
+  }
 
   return {
     reviewer: optionalAgentName(source.reviewer, BUNDLED_REVIEWER_AGENT),
     aggregator: optionalAgentName(source.aggregator, BUNDLED_AGGREGATOR_AGENT),
+    debug: source.debug === true,
     models,
     aggregator_model: aggregatorModel,
-    reviewer_permission: readPermissionOverride(source.reviewer_permission),
-    aggregator_permission: readPermissionOverride(source.aggregator_permission),
+    reviewer_permission: readPermissionOverride(source.reviewer_permission, warn),
+    aggregator_permission: readPermissionOverride(source.aggregator_permission, warn),
     timeouts: {
-      councillor_ms: readTimeoutMs(
-        timeoutSource,
-        "councillor_ms",
-        COUNCILLOR_TIMEOUT_MS,
-      ),
-      councillor_retry_ms: readTimeoutMs(
-        timeoutSource,
-        "councillor_retry_ms",
-        COUNCILLOR_RETRY_TIMEOUT_MS,
-      ),
-      aggregator_ms: readTimeoutMs(
-        timeoutSource,
-        "aggregator_ms",
-        AGGREGATOR_TIMEOUT_MS,
-      ),
-      hard_cap_ms: readTimeoutMs(timeoutSource, "hard_cap_ms", HARD_CAP_MS),
+      councillor_ms: councillorMs,
+      councillor_retry_ms: councillorRetryMs,
+      aggregator_ms: aggregatorMs,
+      hard_cap_ms: hardCapMs,
     },
   };
 }
@@ -343,10 +388,12 @@ export async function raceWithTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   label: string,
+  onTimeout?: () => void,
 ): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
+      onTimeout?.();
       reject(
         new Error(`${label} timed out after ${formatSeconds(timeoutMs)}`),
       );
@@ -414,10 +461,32 @@ function formatFailureSummary(failures: CouncillorFailure[]): string {
 }
 
 const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
+  const pluginOptions = options as CouncilPluginOptions | undefined;
   const rawCouncilOptions = councilOptions(options);
+  const debugEnabled =
+    process.env.COUNCIL_DEBUG === "1" ||
+    pluginOptions?.debug === true ||
+    rawCouncilOptions.debug === true;
+  const log = (
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    extra?: Record<string, unknown>,
+  ) => {
+    if (level === "debug" && !debugEnabled) return;
+    const body: {
+      service: string;
+      level: "debug" | "info" | "warn" | "error";
+      message: string;
+      extra?: Record<string, unknown>;
+    } = { service: "council-plugin", level, message };
+    if (extra !== undefined) body.extra = extra;
+    void ctx.client.app.log({ body });
+  };
   const userSpecifiedReviewer = hasUserSpecifiedAgent(rawCouncilOptions, "reviewer");
   const userSpecifiedAggregator = hasUserSpecifiedAgent(rawCouncilOptions, "aggregator");
-  const councilConfig = parseCouncilConfig(options);
+  const councilConfig = parseCouncilConfig(options, (message, extra) =>
+    log("warn", message, extra),
+  );
 
   async function parentDirectory(sessionID: string): Promise<string> {
     const parentSession = await ctx.client.session
@@ -458,7 +527,10 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   }
 
   async function reviewerSessionPermission(parentSessionID: string): Promise<PermissionRuleset> {
-    const ruleset = buildReviewerRuleset(await parentDirectory(parentSessionID));
+    const ruleset = buildReviewerRuleset(
+      await parentDirectory(parentSessionID),
+      (msg) => log("warn", msg),
+    );
     if (councilConfig.reviewer_permission) {
       ruleset.push(...permissionConfigToRuleset(councilConfig.reviewer_permission));
     }
@@ -520,34 +592,65 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     attempt: number;
   }): Promise<string> {
     const label = modelLabel(input.model);
-    return await raceWithTimeout(
-      (async () => {
-        let sessionID: string | undefined;
-        try {
-          sessionID = await createChildSession(
-            input.parentSessionID,
-            `council: ${label} attempt ${input.attempt}`,
-            await reviewerSessionPermission(input.parentSessionID),
-          );
+    const startedAt = Date.now();
+    log("debug", "councillor attempt started", {
+      model: label,
+      attempt: input.attempt,
+      timeout_ms: input.timeoutMs,
+    });
 
-          return await promptAndExtract({
-            sessionID,
-            agent: councilConfig.reviewer,
-            model: input.model,
-            prompt: input.prompt,
-          });
-        } finally {
-          // Known limitation: indefinite hangs never reach finally; server-side session TTL is the fallback.
-          if (sessionID) {
-            await ctx.client.session
-              .abort({ path: { id: sessionID } })
-              .catch(() => {});
+    try {
+      const response = await raceWithTimeout(
+        (async () => {
+          let sessionID: string | undefined;
+          try {
+            sessionID = await createChildSession(
+              input.parentSessionID,
+              `council: ${label} attempt ${input.attempt}`,
+              await reviewerSessionPermission(input.parentSessionID),
+            );
+
+            return await promptAndExtract({
+              sessionID,
+              agent: councilConfig.reviewer,
+              model: input.model,
+              prompt: input.prompt,
+            });
+          } finally {
+            // Known limitation: indefinite hangs never reach finally; server-side session TTL is the fallback.
+            if (sessionID) {
+              await ctx.client.session
+                .abort({ path: { id: sessionID } })
+                .catch(() => {});
+            }
           }
-        }
-      })(),
-      input.timeoutMs,
-      `${label} attempt ${input.attempt}`,
-    );
+        })(),
+        input.timeoutMs,
+        `${label} attempt ${input.attempt}`,
+        () => log("debug", "councillor attempt timed out", {
+          model: label,
+          attempt: input.attempt,
+          timeout_ms: input.timeoutMs,
+        }),
+      );
+
+      log("debug", "councillor attempt ended", {
+        model: label,
+        attempt: input.attempt,
+        success: true,
+        duration_ms: Date.now() - startedAt,
+      });
+      return response;
+    } catch (error) {
+      log("debug", "councillor attempt ended", {
+        model: label,
+        attempt: input.attempt,
+        success: false,
+        duration_ms: Date.now() - startedAt,
+        error: errorMessage(error),
+      });
+      throw error;
+    }
   }
 
   async function runCouncillor(input: {
@@ -563,6 +666,10 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
       });
       return { model: input.model, response, attempts: 1 };
     } catch (firstError) {
+      log("debug", "councillor retry triggered", {
+        model: modelLabel(input.model),
+        error: errorMessage(firstError),
+      });
       try {
         const response = await runCouncillorAttempt({
           ...input,
@@ -584,35 +691,63 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     successes: CouncillorSuccess[];
     failures: CouncillorFailure[];
   }): Promise<string> {
-    return await raceWithTimeout(
-      (async () => {
-        let sessionID: string | undefined;
-        try {
-          sessionID = await createChildSession(
-            input.parentSessionID,
-            "council: aggregator synthesis",
-            aggregatorSessionPermission(),
-          );
+    const startedAt = Date.now();
+    log("debug", "aggregator synthesis started", {
+      model: councilConfig.aggregator_model
+        ? modelLabel(councilConfig.aggregator_model)
+        : undefined,
+      timeout_ms: councilConfig.timeouts.aggregator_ms,
+      successes: input.successes.length,
+      failures: input.failures.length,
+    });
 
-          return await promptAndExtract({
-            sessionID,
-            agent: councilConfig.aggregator,
-            model: councilConfig.aggregator_model ?? undefined,
-            tools: AGGREGATOR_TOOLS,
-            prompt: buildAggregatorPrompt(input),
-          });
-        } finally {
-          // Known limitation: indefinite hangs never reach finally; server-side session TTL is the fallback.
-          if (sessionID) {
-            await ctx.client.session
-              .abort({ path: { id: sessionID } })
-              .catch(() => {});
+    try {
+      const response = await raceWithTimeout(
+        (async () => {
+          let sessionID: string | undefined;
+          try {
+            sessionID = await createChildSession(
+              input.parentSessionID,
+              "council: aggregator synthesis",
+              aggregatorSessionPermission(),
+            );
+
+            return await promptAndExtract({
+              sessionID,
+              agent: councilConfig.aggregator,
+              model: councilConfig.aggregator_model ?? undefined,
+              tools: AGGREGATOR_TOOLS,
+              prompt: buildAggregatorPrompt(input),
+            });
+          } finally {
+            // Known limitation: indefinite hangs never reach finally; server-side session TTL is the fallback.
+            if (sessionID) {
+              await ctx.client.session
+                .abort({ path: { id: sessionID } })
+                .catch(() => {});
+            }
           }
-        }
-      })(),
-      councilConfig.timeouts.aggregator_ms,
-      "aggregator synthesis",
-    );
+        })(),
+        councilConfig.timeouts.aggregator_ms,
+        "aggregator synthesis",
+        () => log("debug", "aggregator synthesis timed out", {
+          timeout_ms: councilConfig.timeouts.aggregator_ms,
+        }),
+      );
+
+      log("debug", "aggregator synthesis ended", {
+        success: true,
+        duration_ms: Date.now() - startedAt,
+      });
+      return response;
+    } catch (error) {
+      log("debug", "aggregator synthesis ended", {
+        success: false,
+        duration_ms: Date.now() - startedAt,
+        error: errorMessage(error),
+      });
+      throw error;
+    }
   }
 
   async function runCouncilReview(
@@ -698,6 +833,9 @@ Use when you need adversarial review from multiple models. The tool returns the 
               runCouncilReview(prompt, toolContext.sessionID),
               councilConfig.timeouts.hard_cap_ms,
               "council_review",
+              () => log("debug", "hard cap triggered", {
+                timeout_ms: councilConfig.timeouts.hard_cap_ms,
+              }),
             );
           } catch (error) {
             return `Error: council_review failed: ${errorMessage(error)}`;
