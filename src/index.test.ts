@@ -44,9 +44,13 @@ function createSessionMocks() {
   };
 }
 
-function createContext(session: SessionMocks, directory = "/fallback-directory") {
+function createContext(
+  session: SessionMocks,
+  directory = "/fallback-directory",
+  appLog = vi.fn(async () => ({})),
+) {
   return {
-    client: { session },
+    client: { session, app: { log: appLog } },
     directory,
   };
 }
@@ -64,8 +68,9 @@ async function createExecute(
   session: SessionMocks,
   council: Record<string, unknown>,
   directory?: string,
+  appLog?: ReturnType<typeof vi.fn>,
 ) {
-  const hooks = (await CouncilToolPlugin(createContext(session, directory) as never, {
+  const hooks = (await CouncilToolPlugin(createContext(session, directory, appLog) as never, {
     council,
   } as never)) as unknown as {
     tool: {
@@ -162,6 +167,320 @@ describe("plugin module shape", () => {
   });
 });
 
+describe("structured logging", () => {
+  it("logs undersized explicit hard cap warnings through the opencode app logger", async () => {
+    const appLog = vi.fn(async () => ({}));
+
+    await CouncilToolPlugin(
+      createContext(createSessionMocks(), "/fallback-directory", appLog) as never,
+      {
+        council: validCouncil({ timeouts: { hard_cap_ms: 2_000 } }),
+      } as never,
+    );
+
+    expect(appLog).toHaveBeenCalledWith({
+      body: {
+        service: "council-plugin",
+        level: "warn",
+        message: expect.stringContaining("Configured hard_cap_ms is below computed phase timeout budget"),
+        extra: expect.objectContaining({
+          configured_hard_cap_ms: 2_000,
+          computed_hard_cap_ms: 420_000,
+        }),
+      },
+    });
+  });
+
+  it("logs workspace ask stripping warnings through the opencode app logger", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
+    fs.writeFileSync(
+      path.join(directory, "opencode.json"),
+      JSON.stringify({ permission: { bash: { "*": "ask" } } }),
+    );
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    session.get.mockResolvedValue({ data: { directory } });
+    session.create
+      .mockResolvedValueOnce({ data: { id: "permission-session" } })
+      .mockResolvedValueOnce({ error: "create failed" })
+      .mockResolvedValueOnce({ error: "retry create failed" });
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
+    const hooks = (await CouncilToolPlugin(
+      createContext(session, directory, appLog) as never,
+      { council: validCouncil() } as never,
+    )) as unknown as {
+      tool: { council_review: { execute: (args: { prompt: string }, toolContext: { sessionID: string }) => Promise<string> } };
+    };
+
+    await hooks.tool.council_review.execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    expect(appLog).toHaveBeenCalledWith({
+      body: {
+        service: "council-plugin",
+        level: "warn",
+        message: expect.stringContaining("Stripping ask permission from workspace bash.*"),
+      },
+    });
+    expect(consoleWarn).not.toHaveBeenCalled();
+    consoleWarn.mockRestore();
+  });
+
+  it("emits debug logs when the config debug flag is enabled", async () => {
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockResolvedValue({});
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") })
+      .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
+    const hooks = (await CouncilToolPlugin(
+      createContext(session, "/fallback-directory", appLog) as never,
+      { council: validCouncil({ debug: true }) } as never,
+    )) as unknown as {
+      tool: { council_review: { execute: (args: { prompt: string }, toolContext: { sessionID: string }) => Promise<string> } };
+    };
+
+    await hooks.tool.council_review.execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        service: "council-plugin",
+        level: "debug",
+        message: "councillor attempt started",
+      }),
+    });
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        service: "council-plugin",
+        level: "debug",
+        message: "aggregator synthesis started",
+      }),
+    });
+  });
+
+  it("emits debug logs when COUNCIL_DEBUG is 1", async () => {
+    const previousDebug = process.env.COUNCIL_DEBUG;
+    process.env.COUNCIL_DEBUG = "1";
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockResolvedValue({});
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") })
+      .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
+    const hooks = (await CouncilToolPlugin(
+      createContext(session, "/fallback-directory", appLog) as never,
+      { council: validCouncil() } as never,
+    )) as unknown as {
+      tool: { council_review: { execute: (args: { prompt: string }, toolContext: { sessionID: string }) => Promise<string> } };
+    };
+
+    try {
+      await hooks.tool.council_review.execute(
+        { prompt: "review this" },
+        { sessionID: "parent-session" },
+      );
+
+      expect(appLog).toHaveBeenCalledWith({
+        body: expect.objectContaining({
+          service: "council-plugin",
+          level: "debug",
+          message: "councillor attempt started",
+        }),
+      });
+    } finally {
+      if (previousDebug === undefined) {
+        delete process.env.COUNCIL_DEBUG;
+      } else {
+        process.env.COUNCIL_DEBUG = previousDebug;
+      }
+    }
+  });
+
+  it("does not emit debug logs by default", async () => {
+    const previousDebug = process.env.COUNCIL_DEBUG;
+    delete process.env.COUNCIL_DEBUG;
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockResolvedValue({});
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") })
+      .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
+    const hooks = (await CouncilToolPlugin(
+      createContext(session, "/fallback-directory", appLog) as never,
+      { council: validCouncil() } as never,
+    )) as unknown as {
+      tool: { council_review: { execute: (args: { prompt: string }, toolContext: { sessionID: string }) => Promise<string> } };
+    };
+
+    try {
+      await hooks.tool.council_review.execute(
+        { prompt: "review this" },
+        { sessionID: "parent-session" },
+      );
+
+      expect(appLog).not.toHaveBeenCalledWith({
+        body: expect.objectContaining({ level: "debug" }),
+      });
+    } finally {
+      if (previousDebug !== undefined) process.env.COUNCIL_DEBUG = previousDebug;
+    }
+  });
+
+  it("logs when the outer hard cap timeout triggers", async () => {
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    const slowPrompt = deferred<Record<string, unknown>>();
+    session.create.mockResolvedValue({ data: { id: "slow-session" } });
+    session.prompt.mockReturnValue(slowPrompt.promise);
+    const execute = await createExecute(
+      session,
+      validCouncil({
+        debug: true,
+        timeouts: {
+          councillor_ms: 1_000,
+          councillor_retry_ms: 1_000,
+          aggregator_ms: 1_000,
+          hard_cap_ms: 1,
+        },
+      }),
+      "/fallback-directory",
+      appLog,
+    );
+
+    const result = await execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    expect(result).toContain("council_review timed out");
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        service: "council-plugin",
+        level: "debug",
+        message: "hard cap triggered",
+      }),
+    });
+    slowPrompt.resolve({});
+  });
+
+  it("logs councillor timeout events and retry triggers when debug is enabled", async () => {
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    const slowPrompt = deferred<Record<string, unknown>>();
+    createIds(session, ["a-first", "b-first", "a-retry", "aggregator-session"]);
+    session.prompt.mockImplementation((input: { path: { id: string } }) => {
+      if (input.path.id === "a-first") return slowPrompt.promise;
+      return Promise.resolve({});
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "b-first") return { data: assistantMessages("response b") };
+      if (input.path.id === "a-retry") return { data: assistantMessages("retry response") };
+      return { data: assistantMessages("aggregated response") };
+    });
+    const execute = await createExecute(
+      session,
+      validCouncil({
+        debug: true,
+        timeouts: {
+          councillor_ms: 1,
+          councillor_retry_ms: 1_000,
+          aggregator_ms: 1_000,
+          hard_cap_ms: 5_000,
+        },
+      }),
+      "/fallback-directory",
+      appLog,
+    );
+
+    const result = await execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    expect(result).toBe("aggregated response");
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        level: "debug",
+        message: "councillor attempt timed out",
+      }),
+    });
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        level: "debug",
+        message: "councillor retry triggered",
+      }),
+    });
+    slowPrompt.resolve({});
+  });
+
+  it("logs aggregator timeout events when debug is enabled", async () => {
+    const appLog = vi.fn(async () => ({}));
+    const session = createSessionMocks();
+    const slowAggregator = deferred<Record<string, unknown>>();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation((input: { path: { id: string } }) => {
+      if (input.path.id === "aggregator-session") return slowAggregator.promise;
+      return Promise.resolve({});
+    });
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") });
+    const execute = await createExecute(
+      session,
+      validCouncil({
+        debug: true,
+        timeouts: {
+          councillor_ms: 1_000,
+          councillor_retry_ms: 1_000,
+          aggregator_ms: 1,
+          hard_cap_ms: 5_000,
+        },
+      }),
+      "/fallback-directory",
+      appLog,
+    );
+
+    const result = await execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    expect(result).toContain("aggregator synthesis timed out");
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        level: "debug",
+        message: "aggregator synthesis timed out",
+      }),
+    });
+    slowAggregator.resolve({});
+  });
+});
+
 describe("config hook bundled agents", () => {
   it("bundled reviewer denies write access", () => {
     expect(REVIEWER_PERMISSION).toHaveProperty("write", "deny");
@@ -243,6 +562,14 @@ describe("parseCouncilConfig", () => {
     expect(config.aggregator).toBe("council-plugin-aggregator");
   });
 
+  it("reads the debug option from config", () => {
+    const config = validateCouncilConfig({
+      council: validCouncil({ debug: true }),
+    });
+
+    expect(config.debug).toBe(true);
+  });
+
   it("keeps the validateCouncilConfig export as a backward-compatible alias", () => {
     const config = validateCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } });
 
@@ -268,7 +595,68 @@ describe("parseCouncilConfig", () => {
     ).toThrow("council.models must include at least 2 valid model entries");
   });
 
-  it("clamps invalid timeout values", () => {
+  it("computes the default hard cap from the default phase timeouts", () => {
+    const config = validateCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } });
+
+    expect(config.timeouts.aggregator_ms).toBe(120_000);
+    expect(config.timeouts.hard_cap_ms).toBe(420_000);
+  });
+
+  it("computes the hard cap after reading configured phase timeouts", () => {
+    const config = validateCouncilConfig({
+      council: validCouncil({
+        timeouts: {
+          councillor_ms: 2_000,
+          councillor_retry_ms: 3_000,
+          aggregator_ms: 4_000,
+        },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(39_000);
+  });
+
+  it("honors an explicit hard cap override even when it is below the computed default", () => {
+    const config = validateCouncilConfig({
+      council: validCouncil({
+        timeouts: { hard_cap_ms: 2_000 },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(2_000);
+  });
+
+  it("does not upper-clamp configured phase timeouts", () => {
+    const config = validateCouncilConfig({
+      council: validCouncil({
+        timeouts: { aggregator_ms: 999_999_999 },
+      }),
+    });
+
+    expect(config.timeouts.aggregator_ms).toBe(999_999_999);
+    expect(config.timeouts.hard_cap_ms).toBe(1_000_299_999);
+  });
+
+  it("warns when an explicit hard cap is below the computed hard cap", () => {
+    const warn = vi.fn();
+
+    const config = validateCouncilConfig(
+      {
+        council: validCouncil({
+          timeouts: { hard_cap_ms: 2_000 },
+        }),
+      },
+      warn,
+    );
+
+    expect(config.timeouts.hard_cap_ms).toBe(2_000);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Configured hard_cap_ms is below computed phase timeout budget"),
+      expect.objectContaining({ configured_hard_cap_ms: 2_000, computed_hard_cap_ms: 420_000 }),
+    );
+  });
+
+  it("floors invalid timeout values without upper-clamping large values", () => {
     const config = validateCouncilConfig({
       council: {
         reviewer: "reviewer-agent",
@@ -285,7 +673,7 @@ describe("parseCouncilConfig", () => {
 
     expect(config.timeouts.councillor_ms).toBe(1);
     expect(config.timeouts.councillor_retry_ms).toBe(1);
-    expect(config.timeouts.aggregator_ms).toBe(360_000);
+    expect(config.timeouts.aggregator_ms).toBe(999_999_999);
     expect(config.timeouts.hard_cap_ms).toBe(500);
   });
 
@@ -306,7 +694,7 @@ describe("parseCouncilConfig", () => {
     expect(config.timeouts.councillor_ms).toBe(180_000);
     expect(config.timeouts.councillor_retry_ms).toBe(90_000);
     expect(config.timeouts.aggregator_ms).toBe(500);
-    expect(config.timeouts.hard_cap_ms).toBe(360_000);
+    expect(config.timeouts.hard_cap_ms).toBe(300_500);
   });
 
   it("keeps flat allow and deny permission overrides", () => {
@@ -348,29 +736,53 @@ describe("parseCouncilConfig", () => {
   });
 
   it("strips flat ask permission overrides with a warning", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.fn();
 
-    const config = validateCouncilConfig({
-      council: validCouncil({ reviewer_permission: { bash: "ask" } }),
-    });
+    const config = validateCouncilConfig(
+      {
+        council: validCouncil({ reviewer_permission: { bash: "ask" } }),
+      },
+      warn,
+    );
 
     expect(config.reviewer_permission).toEqual({});
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("Stripping ask permission override"),
     );
-    warn.mockRestore();
+  });
+
+  it("routes ask permission stripping warnings through the supplied warning logger", () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.fn();
+
+    const config = validateCouncilConfig(
+      {
+        council: validCouncil({ reviewer_permission: { bash: "ask" } }),
+      },
+      warn,
+    );
+
+    expect(config.reviewer_permission).toEqual({});
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Stripping ask permission override for bash"),
+    );
+    expect(consoleWarn).not.toHaveBeenCalled();
+    consoleWarn.mockRestore();
   });
 
   it("strips nested ask permission override entries with a warning", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.fn();
 
-    const config = validateCouncilConfig({
-      council: validCouncil({
-        reviewer_permission: {
-          external_directory: { "/path/*": "ask", "/other/*": "allow" },
-        },
-      }),
-    });
+    const config = validateCouncilConfig(
+      {
+        council: validCouncil({
+          reviewer_permission: {
+            external_directory: { "/path/*": "ask", "/other/*": "allow" },
+          },
+        }),
+      },
+      warn,
+    );
 
     expect(config.reviewer_permission).toEqual({
       external_directory: { "/other/*": "allow" },
@@ -378,22 +790,23 @@ describe("parseCouncilConfig", () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("Stripping ask permission override"),
     );
-    warn.mockRestore();
   });
 
   it("removes nested permission keys when all entries are ask", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.fn();
 
-    const config = validateCouncilConfig({
-      council: validCouncil({
-        reviewer_permission: {
-          external_directory: { "/path/*": "ask" },
-        },
-      }),
-    });
+    const config = validateCouncilConfig(
+      {
+        council: validCouncil({
+          reviewer_permission: {
+            external_directory: { "/path/*": "ask" },
+          },
+        }),
+      },
+      warn,
+    );
 
     expect(config.reviewer_permission).toEqual({});
-    warn.mockRestore();
   });
 
   it("skips invalid permission override values", () => {
@@ -585,7 +998,7 @@ describe("child session permissions", () => {
         },
       }),
     );
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const appLog = vi.fn(async () => ({}));
     const session = createSessionMocks();
     session.get.mockResolvedValue({ data: { directory } });
     session.create
@@ -594,7 +1007,7 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
-    const execute = await createExecute(session, validCouncil(), directory);
+    const execute = await createExecute(session, validCouncil(), directory, appLog);
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
@@ -611,10 +1024,12 @@ describe("child session permissions", () => {
       }),
     );
     expectNoAskRules(createPermissions(session)[0]);
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("Stripping ask permission from workspace"),
-    );
-    warn.mockRestore();
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        level: "warn",
+        message: expect.stringContaining("Stripping ask permission from workspace"),
+      }),
+    });
   });
 
   it("passes external_directory allow and deny rules from the workspace opencode config", async () => {
@@ -631,7 +1046,7 @@ describe("child session permissions", () => {
         },
       }),
     );
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const appLog = vi.fn(async () => ({}));
     const session = createSessionMocks();
     session.get.mockResolvedValue({ data: { directory } });
     session.create
@@ -640,7 +1055,7 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
-    const execute = await createExecute(session, validCouncil(), directory);
+    const execute = await createExecute(session, validCouncil(), directory, appLog);
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
@@ -659,10 +1074,12 @@ describe("child session permissions", () => {
       },
     ]);
     expectNoAskRules(createPermissions(session)[0]);
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("Stripping ask permission from workspace"),
-    );
-    warn.mockRestore();
+    expect(appLog).toHaveBeenCalledWith({
+      body: expect.objectContaining({
+        level: "warn",
+        message: expect.stringContaining("Stripping ask permission from workspace"),
+      }),
+    });
   });
 
   it("appends explicit reviewer permission overrides after workspace rules", async () => {
@@ -802,7 +1219,6 @@ describe("child session permissions", () => {
   });
 
   it("omits aggregator permissions when explicit overrides are empty after ask stripping", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const session = createSessionMocks();
     session.create
       .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
@@ -822,7 +1238,6 @@ describe("child session permissions", () => {
 
     expect((session.create.mock.calls[2][0] as { body: Record<string, unknown> }).body)
       .not.toHaveProperty("permission");
-    warn.mockRestore();
   });
 
   it("reads workspace permission rules from the parent session directory", async () => {
@@ -937,7 +1352,6 @@ describe("child session permissions", () => {
   });
 
   it("passes explicit reviewer and aggregator permission overrides at session level", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const session = createSessionMocks();
     session.create
       .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
@@ -981,7 +1395,6 @@ describe("child session permissions", () => {
     expectNoAskRules(createCalls[0][0].body.permission);
     expectNoAskRules(createCalls[1][0].body.permission);
     expectNoAskRules(createCalls[2][0].body.permission);
-    warn.mockRestore();
   });
 });
 
