@@ -55,6 +55,11 @@
     "plugin",
     "council",
     "review",
-    "multi-model"
+    "multi-model",
+    "opencode-plugin",
+    "code-review",
+    "adversarial-review",
+    "multi-agent",
+    "llm"
   ]
 }
