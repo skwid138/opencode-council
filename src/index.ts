@@ -9,6 +9,12 @@
 import { tool, type Plugin, type PluginOptions } from "@opencode-ai/plugin";
 import { createLogger, errorMessage, modelLabel } from "./logging";
 import {
+  aggregatorSessionPermission,
+  buildReviewerRuleset,
+  permissionConfigToRuleset,
+  readPermissionOverride,
+} from "./permissions";
+import {
   AGGREGATOR_PERMISSION,
   AGGREGATOR_PROMPT,
   REVIEWER_PERMISSION,
@@ -23,10 +29,8 @@ import {
   type CouncillorFailure,
   type CouncillorSuccess,
   isModelConfig,
-  isPermissionAction,
   isPlainObject,
   type ModelConfig,
-  type PermissionOverrideConfig,
   type PermissionRuleset,
   type ReviewState,
   type TimeoutConfig,
@@ -114,120 +118,6 @@ function optionalAgentName(value: unknown, fallback: string): string {
 function hasUserSpecifiedAgent(source: Record<string, unknown>, key: string): boolean {
   const value = source[key];
   return typeof value === "string" && value.trim().length > 0;
-}
-
-function warnAskStripped(scope: string, warn: (msg: string) => void): void {
-  warn(
-    `Stripping ask permission override for ${scope}; child sessions cannot prompt interactively (anomalyco/opencode#28037)`,
-  );
-}
-
-function readPermissionOverride(
-  value: unknown,
-  warn: (msg: string) => void,
-): PermissionOverrideConfig | null {
-  if (!isPlainObject(value)) return null;
-
-  const result: PermissionOverrideConfig = {};
-
-  for (const [permission, actionOrPatterns] of Object.entries(value)) {
-    if (isPermissionAction(actionOrPatterns)) {
-      result[permission] = actionOrPatterns;
-      continue;
-    }
-
-    if (actionOrPatterns === "ask") {
-      warnAskStripped(permission, warn);
-      continue;
-    }
-
-    if (!isPlainObject(actionOrPatterns)) continue;
-
-    const patterns: Record<string, string> = {};
-    for (const [pattern, action] of Object.entries(actionOrPatterns)) {
-      if (isPermissionAction(action)) {
-        patterns[pattern] = action;
-      } else if (action === "ask") {
-        warnAskStripped(`${permission}.${pattern}`, warn);
-      }
-    }
-
-    if (Object.keys(patterns).length > 0) {
-      result[permission] = patterns;
-    }
-  }
-
-  return result;
-}
-
-function permissionConfigToRuleset(config: PermissionOverrideConfig): PermissionRuleset {
-  const ruleset: PermissionRuleset = [];
-  for (const [permission, actionOrPatterns] of Object.entries(config)) {
-    if (isPermissionAction(actionOrPatterns)) {
-      ruleset.push({ permission, pattern: "*", action: actionOrPatterns });
-      continue;
-    }
-
-    if (!isPlainObject(actionOrPatterns)) continue;
-    for (const [pattern, action] of Object.entries(actionOrPatterns)) {
-      if (isPermissionAction(action)) {
-        ruleset.push({ permission, pattern, action });
-      }
-    }
-  }
-  return ruleset;
-}
-
-function warnWorkspaceAskStripped(
-  permission: string,
-  pattern: string,
-  warn: (msg: string) => void,
-): void {
-  warn(
-    `Stripping ask permission from workspace ${permission}.${pattern}; child sessions cannot prompt interactively (anomalyco/opencode#28037)`,
-  );
-}
-
-function workspacePatternRules(
-  permission: "bash" | "external_directory",
-  value: unknown,
-  warn: (msg: string) => void,
-): PermissionRuleset {
-  if (!isPlainObject(value)) return [];
-
-  const ruleset: PermissionRuleset = [];
-  for (const [pattern, action] of Object.entries(value)) {
-    if (isPermissionAction(action)) {
-      ruleset.push({ permission, pattern, action });
-    } else if (action === "ask") {
-      // Strip ask values — child sessions cannot prompt interactively (anomalyco/opencode#28037).
-      warnWorkspaceAskStripped(permission, pattern, warn);
-    }
-  }
-  return ruleset;
-}
-
-function buildReviewerRuleset(
-  permission: unknown,
-  warn: (msg: string) => void,
-): PermissionRuleset {
-  // Temporary #28037 workaround — prevents ask prompts that hang TUI in child sessions.
-  // Only bash and external_directory default to ask in opencode; other tools default to allow.
-  const catchAllAllows: PermissionRuleset = [
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "external_directory", pattern: "*", action: "allow" },
-  ];
-
-  const bash = isPlainObject(permission) ? permission.bash : undefined;
-  const externalDirectory = isPlainObject(permission)
-    ? permission.external_directory
-    : undefined;
-
-  return [
-    ...catchAllAllows,
-    ...workspacePatternRules("bash", bash, warn),
-    ...workspacePatternRules("external_directory", externalDirectory, warn),
-  ];
 }
 
 function readTimeoutMs(
@@ -451,13 +341,6 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     return sessionID;
   }
 
-  function aggregatorSessionPermission(): PermissionRuleset | undefined {
-    if (!councilConfig.aggregator_permission) return undefined;
-
-    const ruleset = permissionConfigToRuleset(councilConfig.aggregator_permission);
-    return ruleset.length > 0 ? ruleset : undefined;
-  }
-
   async function promptAndExtract(input: {
     sessionID: string;
     agent: string;
@@ -646,7 +529,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
               input.parentSessionID,
               "council: aggregator synthesis",
               input.directory,
-              aggregatorSessionPermission(),
+              aggregatorSessionPermission(councilConfig),
               input.reviewState,
             );
 
