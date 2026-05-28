@@ -8,9 +8,10 @@
 
 import { tool, type Plugin, type PluginOptions } from "@opencode-ai/plugin";
 import {
+  composeCouncilConfig,
   councilOptions,
   hasUserSpecifiedAgent,
-  parseCouncilConfig,
+  resolveDebug,
   REVIEWER_TEMPERATURE_IGNORED_WARNING,
 } from "./config";
 import { createLogger, errorMessage } from "./logging";
@@ -24,20 +25,15 @@ import {
 import {
   BUNDLED_AGGREGATOR_AGENT,
   BUNDLED_REVIEWER_AGENT,
-  type CouncilPluginOptions,
 } from "./types";
 
 const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
-  const pluginOptions = options as CouncilPluginOptions | undefined;
   const rawCouncilOptions = councilOptions(options);
-  const debugEnabled =
-    process.env.COUNCIL_DEBUG === "1" ||
-    pluginOptions?.debug === true ||
-    rawCouncilOptions.debug === true;
+  const debugEnabled = resolveDebug(options);
   const log = createLogger(ctx, debugEnabled);
   const userSpecifiedReviewer = hasUserSpecifiedAgent(rawCouncilOptions, "reviewer");
   const userSpecifiedAggregator = hasUserSpecifiedAgent(rawCouncilOptions, "aggregator");
-  const councilConfig = parseCouncilConfig(options, (message, extra) =>
+  const councilConfig = composeCouncilConfig(options, (message, extra) =>
     log("warn", message, extra),
   );
   if (userSpecifiedReviewer && councilConfig.reviewer_temperature !== null) {
@@ -109,7 +105,12 @@ Use when you need adversarial review from multiple models. The tool returns the 
 };
 
 export { CouncilToolPlugin };
-export { parseCouncilConfig, parseCouncilConfig as validateCouncilConfig } from "./config";
+export {
+  composeCouncilConfig,
+  parseCouncilConfig,
+  parseCouncilConfig as validateCouncilConfig,
+  resolveDebug,
+} from "./config";
 export { raceWithTimeout } from "./timeout";
 
 export default { server: CouncilToolPlugin };

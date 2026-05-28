@@ -21,6 +21,32 @@ export function councilOptions(raw: unknown): Record<string, unknown> {
   return isPlainObject(raw.council) ? raw.council : raw;
 }
 
+/**
+ * Env-aware debug resolver. NOT pure (reads `process.env.COUNCIL_DEBUG`).
+ *
+ * Precedence is first true wins:
+ * 1. `process.env.COUNCIL_DEBUG === "1"` (strict equality; no trim and no other truthy values)
+ * 2. Top-level `debug === true` on the raw plugin options
+ * 3. Nested `council.debug === true` after `councilOptions(rawPluginOptions)` resolution
+ *
+ * The top-level check is load-bearing for the `{ debug: true, council: { models: [...] } }`
+ * shape because `councilOptions` descends into `.council` and drops top-level `debug`.
+ */
+export function resolveDebug(rawPluginOptions: unknown): boolean {
+  if (process.env.COUNCIL_DEBUG === "1") return true;
+  if (
+    isPlainObject(rawPluginOptions) &&
+    (rawPluginOptions as { debug?: unknown }).debug === true
+  ) {
+    return true;
+  }
+  const nested = councilOptions(rawPluginOptions);
+  if (isPlainObject(nested) && (nested as { debug?: unknown }).debug === true) {
+    return true;
+  }
+  return false;
+}
+
 export function optionalAgentName(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
@@ -54,7 +80,7 @@ export function readReviewerTemperature(source: Record<string, unknown>): number
 export function parseCouncilConfig(
   raw: unknown,
   warn: WarningLogger = () => {},
-): CouncilConfig {
+): Omit<CouncilConfig, "debug"> {
   const source = councilOptions(raw);
 
   if (!Array.isArray(source.models)) {
@@ -109,7 +135,6 @@ export function parseCouncilConfig(
   return {
     reviewer: optionalAgentName(source.reviewer, BUNDLED_REVIEWER_AGENT),
     aggregator: optionalAgentName(source.aggregator, BUNDLED_AGGREGATOR_AGENT),
-    debug: source.debug === true,
     models,
     aggregator_model: aggregatorModel,
     reviewer_temperature: readReviewerTemperature(source),
@@ -122,4 +147,11 @@ export function parseCouncilConfig(
       hard_cap_ms: hardCapMs,
     },
   };
+}
+
+export function composeCouncilConfig(
+  raw: unknown,
+  warn: WarningLogger = () => {},
+): CouncilConfig {
+  return { ...parseCouncilConfig(raw, warn), debug: resolveDebug(raw) };
 }

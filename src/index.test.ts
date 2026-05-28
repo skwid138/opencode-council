@@ -21,9 +21,11 @@ vi.mock("./logging", async (importOriginal) => {
 });
 
 import defaultExport, {
+  composeCouncilConfig,
   CouncilToolPlugin,
   parseCouncilConfig,
   raceWithTimeout,
+  resolveDebug,
   validateCouncilConfig,
 } from "./index";
 import {
@@ -96,6 +98,11 @@ describe("public re-exports", () => {
   it("re-exports raceWithTimeout", async () => {
     await expect(raceWithTimeout(Promise.resolve("ok"), 250, "fast operation"))
       .resolves.toBe("ok");
+  });
+
+  it("re-exports resolveDebug and composeCouncilConfig from root", () => {
+    expect(typeof resolveDebug).toBe("function");
+    expect(typeof composeCouncilConfig).toBe("function");
   });
 });
 
