@@ -142,9 +142,12 @@ If you explicitly set `hard_cap_ms`, the plugin honors it exactly. If the explic
 
 ### Debug logging
 
-Structured debug logging can be enabled in either of two ways:
+Structured debug logging is resolved once when the plugin initializes, then the
+same logger is reused for every `council_review` invocation. It can be enabled
+from any of three sources:
 
 - Set `COUNCIL_DEBUG=1` in the environment before starting opencode.
+- Set top-level plugin option `"debug": true`.
 - Set `"debug": true` in the plugin's `council` config.
 
 Logs are emitted through opencode's app logger as `ctx.client.app.log({ body: { service: "council-plugin", level, message, extra } })`. Debug logs include councillor start/end, retry triggers, aggregator start/end, timeout events, and hard-cap triggers. Warnings, including stripped `ask` permissions and undersized explicit hard caps, also use the same structured logger.
@@ -202,6 +205,22 @@ For working examples of reviewer and aggregator agent definitions, see:
 3. **Gate** — At least 2 successful responses are required. Otherwise, an error is returned for fallback handling.
 4. **Aggregate** — Successful responses are passed to the `aggregator` agent, which performs structural synthesis without issuing its own verdict.
 5. **Return** — The aggregated result is returned to the calling agent.
+
+## Source structure
+
+The runtime is split into focused internal modules under `src/`:
+
+- `index.ts` — plugin registration, config hook, tool handler, public re-exports, default export
+- `config.ts` — council option parsing, defaults, timeout constants, config warnings
+- `permissions.ts` — permission override normalization and child-session ruleset construction
+- `session.ts` — child-session creation, parent-directory lookup, prompt/response extraction
+- `councillor.ts` — reviewer attempt lifecycle and retry behavior
+- `aggregator.ts` — aggregator prompt formatting and synthesis session lifecycle
+- `orchestrator.ts` — per-review fan-out, success threshold, hard-cap handling
+- `timeout.ts` — timeout race helper and formatting
+- `logging.ts` — structured logger factory and shared log helpers
+- `types.ts` — shared types, bundled agent constants, and type guards
+- `prompts.ts` — bundled reviewer and aggregator prompts/permissions
 
 ## Tool exposed
 
