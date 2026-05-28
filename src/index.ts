@@ -7,6 +7,7 @@
  */
 
 import { tool, type Plugin, type PluginOptions } from "@opencode-ai/plugin";
+import { createLogger, errorMessage, modelLabel } from "./logging";
 import {
   AGGREGATOR_PERMISSION,
   AGGREGATOR_PROMPT,
@@ -323,14 +324,6 @@ export function parseCouncilConfig(
 
 export { parseCouncilConfig as validateCouncilConfig };
 
-function modelLabel(model: ModelConfig): string {
-  return `${model.providerID}/${model.modelID}`;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function buildAggregatorPrompt(input: {
   originalPrompt: string;
   successes: CouncillorSuccess[];
@@ -391,21 +384,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     process.env.COUNCIL_DEBUG === "1" ||
     pluginOptions?.debug === true ||
     rawCouncilOptions.debug === true;
-  const log = (
-    level: "debug" | "info" | "warn" | "error",
-    message: string,
-    extra?: Record<string, unknown>,
-  ) => {
-    if (level === "debug" && !debugEnabled) return;
-    const body: {
-      service: string;
-      level: "debug" | "info" | "warn" | "error";
-      message: string;
-      extra?: Record<string, unknown>;
-    } = { service: "council-plugin", level, message };
-    if (extra !== undefined) body.extra = extra;
-    void ctx.client.app.log({ body });
-  };
+  const log = createLogger(ctx, debugEnabled);
   const userSpecifiedReviewer = hasUserSpecifiedAgent(rawCouncilOptions, "reviewer");
   const userSpecifiedAggregator = hasUserSpecifiedAgent(rawCouncilOptions, "aggregator");
   const councilConfig = parseCouncilConfig(options, (message, extra) =>
