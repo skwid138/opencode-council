@@ -13,70 +13,30 @@ import {
   REVIEWER_PERMISSION,
   REVIEWER_PROMPT,
 } from "./prompts";
+import {
+  BUNDLED_AGGREGATOR_AGENT,
+  BUNDLED_REVIEWER_AGENT,
+  type CouncilConfig,
+  type CouncilPluginOptions,
+  type CouncillorFailure,
+  type CouncillorSuccess,
+  isModelConfig,
+  isPermissionAction,
+  isPlainObject,
+  type ModelConfig,
+  type PermissionOverrideConfig,
+  type PermissionRuleset,
+  type ReviewState,
+  type TimeoutConfig,
+  type WarningLogger,
+} from "./types";
 
 const COUNCILLOR_TIMEOUT_MS = 180_000;
 const COUNCILLOR_RETRY_TIMEOUT_MS = 90_000;
 const AGGREGATOR_TIMEOUT_MS = 120_000;
 const DEFAULT_HARD_CAP_MS = COUNCILLOR_TIMEOUT_MS + COUNCILLOR_RETRY_TIMEOUT_MS + AGGREGATOR_TIMEOUT_MS + 30_000;
-const BUNDLED_REVIEWER_AGENT = "council-plugin-reviewer";
-const BUNDLED_AGGREGATOR_AGENT = "council-plugin-aggregator";
 const REVIEWER_TEMPERATURE_IGNORED_WARNING =
   "reviewer_temperature is configured but will be ignored because a custom reviewer agent is specified — temperature only applies to the bundled reviewer";
-
-type CouncilPluginOptions = PluginOptions & {
-  council?: Record<string, unknown>;
-  debug?: boolean;
-};
-
-type TimeoutConfig = {
-  councillor_ms: number;
-  councillor_retry_ms: number;
-  aggregator_ms: number;
-  hard_cap_ms: number;
-};
-
-type ModelConfig = {
-  providerID: string;
-  modelID: string;
-};
-
-type PermissionOverrideConfig = Record<string, string | Record<string, string>>;
-
-type CouncilConfig = {
-  reviewer: string;
-  aggregator: string;
-  debug: boolean;
-  models: ModelConfig[];
-  aggregator_model: ModelConfig | null;
-  reviewer_temperature: number | null;
-  reviewer_permission: PermissionOverrideConfig | null;
-  aggregator_permission: PermissionOverrideConfig | null;
-  timeouts: TimeoutConfig;
-};
-
-type PermissionRuleset = Array<{
-  permission: string;
-  pattern: string;
-  action: "allow" | "deny";
-}>;
-
-type CouncillorSuccess = {
-  model: ModelConfig;
-  response: string;
-  attempts: number;
-};
-
-type CouncillorFailure = {
-  model: ModelConfig;
-  error: string;
-};
-
-type WarningLogger = (message: string, extra?: Record<string, unknown>) => void;
-
-type ReviewState = {
-  activeSessions: Set<string>;
-  hardCapTimedOut: boolean;
-};
 
 const AGGREGATOR_TOOLS = {
   "chrome-devtools": false,
@@ -138,21 +98,6 @@ function extractLatestAssistantText(messages: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
-function isModelConfig(value: unknown): value is ModelConfig {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.providerID === "string" &&
-    candidate.providerID.trim().length > 0 &&
-    typeof candidate.modelID === "string" &&
-    candidate.modelID.trim().length > 0
-  );
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function councilOptions(raw: unknown): Record<string, unknown> {
   if (!isPlainObject(raw)) return {};
   return isPlainObject(raw.council) ? raw.council : raw;
@@ -167,10 +112,6 @@ function optionalAgentName(value: unknown, fallback: string): string {
 function hasUserSpecifiedAgent(source: Record<string, unknown>, key: string): boolean {
   const value = source[key];
   return typeof value === "string" && value.trim().length > 0;
-}
-
-function isPermissionAction(value: unknown): value is "allow" | "deny" {
-  return value === "allow" || value === "deny";
 }
 
 function warnAskStripped(scope: string, warn: (msg: string) => void): void {
