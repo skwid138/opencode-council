@@ -6,8 +6,6 @@
  * structurally aggregate the results.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { tool, type Plugin, type PluginOptions } from "@opencode-ai/plugin";
 import {
   AGGREGATOR_PERMISSION,
@@ -259,7 +257,7 @@ function workspacePatternRules(
 }
 
 function buildReviewerRuleset(
-  directory: string | undefined,
+  permission: unknown,
   warn: (msg: string) => void,
 ): PermissionRuleset {
   // Temporary #28037 workaround — prevents ask prompts that hang TUI in child sessions.
@@ -269,23 +267,16 @@ function buildReviewerRuleset(
     { permission: "external_directory", pattern: "*", action: "allow" },
   ];
 
-  try {
-    const configPath = path.join(directory || process.cwd(), "opencode.json");
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as unknown;
-    const permission = isPlainObject(config) ? config.permission : undefined;
-    const bash = isPlainObject(permission) ? permission.bash : undefined;
-    const externalDirectory = isPlainObject(permission)
-      ? permission.external_directory
-      : undefined;
+  const bash = isPlainObject(permission) ? permission.bash : undefined;
+  const externalDirectory = isPlainObject(permission)
+    ? permission.external_directory
+    : undefined;
 
-    return [
-      ...catchAllAllows,
-      ...workspacePatternRules("bash", bash, warn),
-      ...workspacePatternRules("external_directory", externalDirectory, warn),
-    ];
-  } catch {
-    return catchAllAllows;
-  }
+  return [
+    ...catchAllAllows,
+    ...workspacePatternRules("bash", bash, warn),
+    ...workspacePatternRules("external_directory", externalDirectory, warn),
+  ];
 }
 
 function readTimeoutMs(
@@ -487,6 +478,10 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   const councilConfig = parseCouncilConfig(options, (message, extra) =>
     log("warn", message, extra),
   );
+  // Workspace permission config captured from the config hook at startup.
+  // The config hook runs before any tool execution (opencode guarantee), so this
+  // is always populated when buildReviewerRuleset is called.
+  let cachedPermission: unknown;
 
   async function parentDirectory(sessionID: string): Promise<string> {
     const parentSession = await ctx.client.session
@@ -498,6 +493,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   async function createChildSession(
     parentSessionID: string,
     title: string,
+    directory: string,
     permission?: PermissionRuleset,
   ): Promise<string> {
     const body: Record<string, unknown> = {
@@ -508,7 +504,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
 
     const createResult = await ctx.client.session.create({
       body,
-      query: { directory: await parentDirectory(parentSessionID) },
+      query: { directory },
     } as Parameters<typeof ctx.client.session.create>[0]) as {
       data?: { id?: string };
       error?: unknown;
@@ -524,17 +520,6 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     }
 
     return sessionID;
-  }
-
-  async function reviewerSessionPermission(parentSessionID: string): Promise<PermissionRuleset> {
-    const ruleset = buildReviewerRuleset(
-      await parentDirectory(parentSessionID),
-      (msg) => log("warn", msg),
-    );
-    if (councilConfig.reviewer_permission) {
-      ruleset.push(...permissionConfigToRuleset(councilConfig.reviewer_permission));
-    }
-    return ruleset;
   }
 
   function aggregatorSessionPermission(): PermissionRuleset | undefined {
@@ -590,6 +575,8 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     model: ModelConfig;
     timeoutMs: number;
     attempt: number;
+    directory: string;
+    reviewerPermission: PermissionRuleset;
   }): Promise<string> {
     const label = modelLabel(input.model);
     const startedAt = Date.now();
@@ -607,7 +594,8 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
             sessionID = await createChildSession(
               input.parentSessionID,
               `council: ${label} attempt ${input.attempt}`,
-              await reviewerSessionPermission(input.parentSessionID),
+              input.directory,
+              [...input.reviewerPermission],
             );
 
             return await promptAndExtract({
@@ -657,6 +645,8 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     parentSessionID: string;
     prompt: string;
     model: ModelConfig;
+    directory: string;
+    reviewerPermission: PermissionRuleset;
   }): Promise<CouncillorSuccess> {
     try {
       const response = await runCouncillorAttempt({
@@ -690,6 +680,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     originalPrompt: string;
     successes: CouncillorSuccess[];
     failures: CouncillorFailure[];
+    directory: string;
   }): Promise<string> {
     const startedAt = Date.now();
     log("debug", "aggregator synthesis started", {
@@ -709,6 +700,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
             sessionID = await createChildSession(
               input.parentSessionID,
               "council: aggregator synthesis",
+              input.directory,
               aggregatorSessionPermission(),
             );
 
@@ -754,8 +746,30 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     prompt: string,
     parentSessionID: string,
   ): Promise<string> {
+    // Resolve parent directory once per review — avoids 2N+1 redundant session.get SDK calls.
+    const directory = await parentDirectory(parentSessionID);
+    // Permission layering (last-match-wins in opencode's evaluator):
+    // 1. Catch-all allows — #28037 workaround (lowest priority)
+    // 2. Workspace deny/allow rules — from cachedPermission (ask values stripped)
+    // 3. User reviewer_permission overrides (highest priority)
+    const reviewerPermission = [
+      ...buildReviewerRuleset(cachedPermission, (msg) => log("warn", msg)),
+      ...(councilConfig.reviewer_permission
+        ? permissionConfigToRuleset(councilConfig.reviewer_permission)
+        : []),
+    ];
+    log("debug", "buildReviewerRuleset permission output", {
+      permission_json: JSON.stringify(reviewerPermission),
+    });
+
     const councillorPromises = councilConfig.models.map((model) =>
-      runCouncillor({ parentSessionID, prompt, model }),
+      runCouncillor({
+        parentSessionID,
+        prompt,
+        model,
+        directory,
+        reviewerPermission,
+      }),
     );
 
     const settledResults = await Promise.allSettled(councillorPromises);
@@ -786,11 +800,13 @@ ${formatFailureSummary(failures)}`;
       originalPrompt: prompt,
       successes,
       failures,
+      directory,
     });
   }
 
   return {
     config: async (config: Record<string, unknown>) => {
+      cachedPermission = config.permission;
       config.agent ??= {};
       const agents = config.agent as Record<string, unknown>;
 

@@ -69,10 +69,12 @@ async function createExecute(
   council: Record<string, unknown>,
   directory?: string,
   appLog?: ReturnType<typeof vi.fn>,
+  resolvedConfig: Record<string, unknown> = {},
 ) {
   const hooks = (await CouncilToolPlugin(createContext(session, directory, appLog) as never, {
     council,
   } as never)) as unknown as {
+    config: (config: Record<string, unknown>) => Promise<void>;
     tool: {
       council_review: {
         execute: (
@@ -82,6 +84,7 @@ async function createExecute(
       };
     };
   };
+  await hooks.config(resolvedConfig);
   return hooks.tool.council_review.execute as (
     args: { prompt: string },
     toolContext: { sessionID: string },
@@ -192,15 +195,9 @@ describe("structured logging", () => {
   });
 
   it("logs workspace ask stripping warnings through the opencode app logger", async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
-    fs.writeFileSync(
-      path.join(directory, "opencode.json"),
-      JSON.stringify({ permission: { bash: { "*": "ask" } } }),
-    );
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const appLog = vi.fn(async () => ({}));
     const session = createSessionMocks();
-    session.get.mockResolvedValue({ data: { directory } });
     session.create
       .mockResolvedValueOnce({ data: { id: "permission-session" } })
       .mockResolvedValueOnce({ error: "create failed" })
@@ -208,11 +205,13 @@ describe("structured logging", () => {
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
     const hooks = (await CouncilToolPlugin(
-      createContext(session, directory, appLog) as never,
+      createContext(session, "/fallback-directory", appLog) as never,
       { council: validCouncil() } as never,
     )) as unknown as {
+      config: (config: Record<string, unknown>) => Promise<void>;
       tool: { council_review: { execute: (args: { prompt: string }, toolContext: { sessionID: string }) => Promise<string> } };
     };
+    await hooks.config({ permission: { bash: { "*": "ask" } } });
 
     await hooks.tool.council_review.execute(
       { prompt: "review this" },
@@ -959,6 +958,30 @@ describe("aggregator threshold", () => {
       "aggregator-session",
     ]);
   });
+
+  it("resolves the parent directory once per review and reuses it for all child sessions", async () => {
+    const session = createSessionMocks();
+    session.get.mockResolvedValue({ data: { directory: "/resolved-parent" } });
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockResolvedValue({});
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") })
+      .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
+    const execute = await createExecute(session, validCouncil());
+
+    await execute({ prompt: "review this" }, { sessionID: "parent-session" });
+
+    expect(session.get).toHaveBeenCalledTimes(1);
+    expect(session.create.mock.calls.map(([input]) => input.query)).toEqual([
+      { directory: "/resolved-parent" },
+      { directory: "/resolved-parent" },
+      { directory: "/resolved-parent" },
+    ]);
+  });
 });
 
 describe("child session permissions", () => {
@@ -983,7 +1006,7 @@ describe("child session permissions", () => {
     }
   });
 
-  it("passes bash allow and deny rules from the workspace opencode config after catch-all allows", async () => {
+  it("passes bash allow and deny rules from the cached config hook permission after catch-all allows", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
     fs.writeFileSync(
       path.join(directory, "opencode.json"),
@@ -1007,7 +1030,16 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
-    const execute = await createExecute(session, validCouncil(), directory, appLog);
+    const execute = await createExecute(session, validCouncil(), directory, appLog, {
+      permission: {
+        bash: {
+          "*": "ask",
+          "git status*": "allow",
+          "npm install*": "ask",
+          "rm *": "deny",
+        },
+      },
+    });
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
@@ -1032,7 +1064,7 @@ describe("child session permissions", () => {
     });
   });
 
-  it("passes external_directory allow and deny rules from the workspace opencode config", async () => {
+  it("passes external_directory allow and deny rules from the cached config hook permission", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
     fs.writeFileSync(
       path.join(directory, "opencode.json"),
@@ -1055,7 +1087,15 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
-    const execute = await createExecute(session, validCouncil(), directory, appLog);
+    const execute = await createExecute(session, validCouncil(), directory, appLog, {
+      permission: {
+        external_directory: {
+          "*": "ask",
+          "/Users/hunter/code/*": "allow",
+          "/Users/hunter/secrets/*": "deny",
+        },
+      },
+    });
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
@@ -1112,6 +1152,8 @@ describe("child session permissions", () => {
         },
       },
       directory,
+      undefined,
+      { permission: { bash: { "git *": "allow" } } },
     );
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
@@ -1240,7 +1282,7 @@ describe("child session permissions", () => {
       .not.toHaveProperty("permission");
   });
 
-  it("reads workspace permission rules from the parent session directory", async () => {
+  it("uses cached config hook permission rules instead of reading parent or fallback opencode files", async () => {
     const fallbackDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "council-fallback-"));
     const parentDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "council-parent-"));
     fs.writeFileSync(
@@ -1259,23 +1301,30 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response a") });
-    const execute = await createExecute(session, validCouncil(), fallbackDirectory);
+    const execute = await createExecute(
+      session,
+      validCouncil(),
+      fallbackDirectory,
+      undefined,
+      { permission: { bash: { "cached *": "deny" } } },
+    );
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
     expect(createPermissions(session)[0]).toEqual([
       { permission: "bash", pattern: "*", action: "allow" },
       { permission: "external_directory", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "parent *", action: "deny" },
+      { permission: "bash", pattern: "cached *", action: "deny" },
     ]);
     expect(createPermissions(session)[0]).toEqual(
       expect.not.arrayContaining([
         { permission: "bash", pattern: "fallback *", action: "deny" },
+        { permission: "bash", pattern: "parent *", action: "deny" },
       ]),
     );
   });
 
-  it("uses catch-all allows when the workspace opencode config is missing", async () => {
+  it("uses catch-all allows when the cached config hook permission is missing", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
     const session = createSessionMocks();
     session.get.mockResolvedValue({ data: { directory } });
@@ -1295,7 +1344,7 @@ describe("child session permissions", () => {
     ]);
   });
 
-  it("uses catch-all allows when the workspace opencode config is malformed", async () => {
+  it("uses catch-all allows when the cached config hook permission is not an object", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
     fs.writeFileSync(path.join(directory, "opencode.json"), "not json");
     const session = createSessionMocks();
@@ -1306,7 +1355,13 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
-    const execute = await createExecute(session, validCouncil(), directory);
+    const execute = await createExecute(
+      session,
+      validCouncil(),
+      directory,
+      undefined,
+      { permission: "allow" },
+    );
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
@@ -1316,7 +1371,7 @@ describe("child session permissions", () => {
     ]);
   });
 
-  it("preserves workspace object key order in the session ruleset", async () => {
+  it("preserves cached permission object key order in the session ruleset", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "council-tool-"));
     fs.writeFileSync(
       path.join(directory, "opencode.json"),
@@ -1338,7 +1393,21 @@ describe("child session permissions", () => {
       .mockResolvedValueOnce({ error: "retry create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("success") });
-    const execute = await createExecute(session, validCouncil(), directory);
+    const execute = await createExecute(
+      session,
+      validCouncil(),
+      directory,
+      undefined,
+      {
+        permission: {
+          bash: {
+            "first *": "allow",
+            "second *": "deny",
+            "third *": "allow",
+          },
+        },
+      },
+    );
 
     await execute({ prompt: "review this" }, { sessionID: "parent-session" });
 
