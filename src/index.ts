@@ -20,6 +20,8 @@ const AGGREGATOR_TIMEOUT_MS = 120_000;
 const DEFAULT_HARD_CAP_MS = COUNCILLOR_TIMEOUT_MS + COUNCILLOR_RETRY_TIMEOUT_MS + AGGREGATOR_TIMEOUT_MS + 30_000;
 const BUNDLED_REVIEWER_AGENT = "council-plugin-reviewer";
 const BUNDLED_AGGREGATOR_AGENT = "council-plugin-aggregator";
+const REVIEWER_TEMPERATURE_IGNORED_WARNING =
+  "reviewer_temperature is configured but will be ignored because a custom reviewer agent is specified — temperature only applies to the bundled reviewer";
 
 type CouncilPluginOptions = PluginOptions & {
   council?: Record<string, unknown>;
@@ -499,6 +501,9 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   const councilConfig = parseCouncilConfig(options, (message, extra) =>
     log("warn", message, extra),
   );
+  if (userSpecifiedReviewer && councilConfig.reviewer_temperature !== null) {
+    log("warn", REVIEWER_TEMPERATURE_IGNORED_WARNING);
+  }
   // Workspace permission config captured from the config hook at startup.
   // The config hook runs before any tool execution (opencode guarantee), so this
   // is always populated when buildReviewerRuleset is called.

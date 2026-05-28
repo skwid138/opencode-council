@@ -31,6 +31,15 @@ import {
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
+const REVIEWER_TEMPERATURE_IGNORED_WARNING =
+  "reviewer_temperature is configured but will be ignored because a custom reviewer agent is specified — temperature only applies to the bundled reviewer";
+const REVIEWER_TEMPERATURE_IGNORED_WARNING_LOG = {
+  body: {
+    service: "council-plugin",
+    level: "warn",
+    message: REVIEWER_TEMPERATURE_IGNORED_WARNING,
+  },
+};
 
 type SessionMocks = ReturnType<typeof createSessionMocks>;
 
@@ -171,6 +180,58 @@ describe("plugin module shape", () => {
 });
 
 describe("structured logging", () => {
+  it("warns when reviewer_temperature is configured with a custom reviewer agent", async () => {
+    const appLog = vi.fn(async () => ({}));
+
+    await CouncilToolPlugin(
+      createContext(createSessionMocks(), "/fallback-directory", appLog) as never,
+      {
+        council: {
+          models: [MODEL_A, MODEL_B],
+          reviewer: "my-reviewer",
+          reviewer_temperature: 1.5,
+        },
+      } as never,
+    );
+
+    expect(appLog).toHaveBeenCalledWith(REVIEWER_TEMPERATURE_IGNORED_WARNING_LOG);
+  });
+
+  it("does not warn for custom reviewer agents when reviewer_temperature is null or omitted", async () => {
+    for (const reviewerTemperatureConfig of [{ reviewer_temperature: null }, {}]) {
+      const appLog = vi.fn(async () => ({}));
+
+      await CouncilToolPlugin(
+        createContext(createSessionMocks(), "/fallback-directory", appLog) as never,
+        {
+          council: {
+            models: [MODEL_A, MODEL_B],
+            reviewer: "my-reviewer",
+            ...reviewerTemperatureConfig,
+          },
+        } as never,
+      );
+
+      expect(appLog).not.toHaveBeenCalledWith(REVIEWER_TEMPERATURE_IGNORED_WARNING_LOG);
+    }
+  });
+
+  it("does not warn when reviewer_temperature configures the bundled reviewer agent", async () => {
+    const appLog = vi.fn(async () => ({}));
+
+    await CouncilToolPlugin(
+      createContext(createSessionMocks(), "/fallback-directory", appLog) as never,
+      {
+        council: {
+          models: [MODEL_A, MODEL_B],
+          reviewer_temperature: 1.5,
+        },
+      } as never,
+    );
+
+    expect(appLog).not.toHaveBeenCalledWith(REVIEWER_TEMPERATURE_IGNORED_WARNING_LOG);
+  });
+
   it("logs undersized explicit hard cap warnings through the opencode app logger", async () => {
     const appLog = vi.fn(async () => ({}));
 
