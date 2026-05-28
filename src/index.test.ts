@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@opencode-ai/plugin", () => {
   const stringSchema = {
@@ -15,6 +15,11 @@ vi.mock("@opencode-ai/plugin", () => {
   return { tool: toolFn };
 });
 
+vi.mock("./logging", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./logging")>();
+  return { ...actual, createLogger: vi.fn(() => vi.fn()) };
+});
+
 import defaultExport, {
   CouncilToolPlugin,
   parseCouncilConfig,
@@ -27,9 +32,24 @@ import {
   REVIEWER_PERMISSION,
   REVIEWER_PROMPT,
 } from "./prompts";
+import { createLogger } from "./logging";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
+const ORIGINAL_COUNCIL_DEBUG = process.env.COUNCIL_DEBUG;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  delete process.env.COUNCIL_DEBUG;
+});
+
+afterEach(() => {
+  if (ORIGINAL_COUNCIL_DEBUG === undefined) {
+    delete process.env.COUNCIL_DEBUG;
+  } else {
+    process.env.COUNCIL_DEBUG = ORIGINAL_COUNCIL_DEBUG;
+  }
+});
 
 function createSessionMocks() {
   return {
@@ -136,6 +156,40 @@ describe("config hook bundled agents", () => {
     await hooks.config?.(config as never);
 
     expect(config.agent).toEqual({ existing: { mode: "subagent" } });
+  });
+});
+
+describe("debug source resolution", () => {
+  it("enables debug logging from COUNCIL_DEBUG", async () => {
+    process.env.COUNCIL_DEBUG = "1";
+    const context = createContext();
+
+    await CouncilToolPlugin(context as never, {
+      council: { models: [MODEL_A, MODEL_B] },
+    } as never);
+
+    expect(createLogger).toHaveBeenCalledWith(context, true);
+  });
+
+  it("enables debug logging from top-level plugin options", async () => {
+    const context = createContext();
+
+    await CouncilToolPlugin(context as never, {
+      debug: true,
+      council: { models: [MODEL_A, MODEL_B] },
+    } as never);
+
+    expect(createLogger).toHaveBeenCalledWith(context, true);
+  });
+
+  it("enables debug logging from nested council options", async () => {
+    const context = createContext();
+
+    await CouncilToolPlugin(context as never, {
+      council: { debug: true, models: [MODEL_A, MODEL_B] },
+    } as never);
+
+    expect(createLogger).toHaveBeenCalledWith(context, true);
   });
 });
 
