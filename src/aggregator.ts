@@ -1,17 +1,14 @@
-import type { PluginInput } from "@opencode-ai/plugin";
-
 import { errorMessage, type Logger, modelLabel } from "./logging";
 import { createChildSession, promptAndExtract } from "./session";
 import { raceWithTimeout } from "./timeout";
 import type {
   CouncilConfig,
+  CouncilPluginContext,
   CouncillorFailure,
   CouncillorSuccess,
   PermissionRuleset,
   ReviewState,
 } from "./types";
-
-type CouncilPluginContext = Pick<PluginInput, "client" | "directory">;
 
 export const AGGREGATOR_TOOLS = {
   "chrome-devtools": false,

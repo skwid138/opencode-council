@@ -1,5 +1,9 @@
+import type { PluginInput } from "@opencode-ai/plugin";
+
 export const BUNDLED_REVIEWER_AGENT = "council-plugin-reviewer";
 export const BUNDLED_AGGREGATOR_AGENT = "council-plugin-aggregator";
+
+export type CouncilPluginContext = Pick<PluginInput, "client" | "directory">;
 
 export type CouncilPluginOptions = {
   council?: Record<string, unknown>;

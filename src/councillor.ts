@@ -1,17 +1,14 @@
-import type { PluginInput } from "@opencode-ai/plugin";
-
 import { errorMessage, type Logger, modelLabel } from "./logging";
 import { createChildSession, promptAndExtract } from "./session";
 import { raceWithTimeout } from "./timeout";
 import type {
   CouncilConfig,
+  CouncilPluginContext,
   CouncillorSuccess,
   ModelConfig,
   PermissionRuleset,
   ReviewState,
 } from "./types";
-
-type CouncilPluginContext = Pick<PluginInput, "client" | "directory">;
 
 export async function runCouncillorAttempt(
   ctx: CouncilPluginContext,

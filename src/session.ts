@@ -1,8 +1,9 @@
-import type { PluginInput } from "@opencode-ai/plugin";
-
-import type { ModelConfig, PermissionRuleset, ReviewState } from "./types";
-
-type CouncilPluginContext = Pick<PluginInput, "client" | "directory">;
+import type {
+  CouncilPluginContext,
+  ModelConfig,
+  PermissionRuleset,
+  ReviewState,
+} from "./types";
 
 export function extractLatestAssistantText(messages: unknown): string | null {
   if (!Array.isArray(messages) || messages.length === 0) return null;

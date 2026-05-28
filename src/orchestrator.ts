@@ -1,5 +1,3 @@
-import type { PluginInput } from "@opencode-ai/plugin";
-
 import { formatFailureSummary, synthesizeWithAggregator } from "./aggregator";
 import { runCouncillor } from "./councillor";
 import { errorMessage, type Logger, modelLabel } from "./logging";
@@ -12,12 +10,11 @@ import { parentDirectory } from "./session";
 import { raceWithTimeout } from "./timeout";
 import type {
   CouncilConfig,
+  CouncilPluginContext,
   CouncillorFailure,
   CouncillorSuccess,
   ReviewState,
 } from "./types";
-
-type CouncilPluginContext = Pick<PluginInput, "client" | "directory">;
 
 async function runCouncilReviewInner(
   ctx: CouncilPluginContext,
