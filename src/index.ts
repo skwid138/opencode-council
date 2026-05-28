@@ -21,7 +21,6 @@ import {
   REVIEWER_PERMISSION,
   REVIEWER_PROMPT,
 } from "./prompts";
-import { raceWithTimeout } from "./timeout";
 import {
   BUNDLED_AGGREGATOR_AGENT,
   BUNDLED_REVIEWER_AGENT,
@@ -111,6 +110,6 @@ Use when you need adversarial review from multiple models. The tool returns the 
 
 export { CouncilToolPlugin };
 export { parseCouncilConfig, parseCouncilConfig as validateCouncilConfig } from "./config";
-export { raceWithTimeout };
+export { raceWithTimeout } from "./timeout";
 
 export default { server: CouncilToolPlugin };
