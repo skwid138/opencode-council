@@ -70,6 +70,11 @@ type CouncillorFailure = {
 
 type WarningLogger = (message: string, extra?: Record<string, unknown>) => void;
 
+type ReviewState = {
+  activeSessions: Set<string>;
+  hardCapTimedOut: boolean;
+};
+
 const AGGREGATOR_TOOLS = {
   "chrome-devtools": false,
   context7: false,
@@ -375,6 +380,11 @@ function formatSeconds(ms: number): string {
   return `${Math.round(ms / 1000)}s`;
 }
 
+/**
+ * Race a promise against a timeout. Does NOT cancel the underlying promise —
+ * cleanup must be handled via the optional `onTimeout` callback or the caller's
+ * own finally/cleanup logic.
+ */
 export async function raceWithTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -495,7 +505,12 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     title: string,
     directory: string,
     permission?: PermissionRuleset,
+    reviewState?: ReviewState,
   ): Promise<string> {
+    if (reviewState?.hardCapTimedOut) {
+      throw new Error("council_review hard cap already triggered");
+    }
+
     const body: Record<string, unknown> = {
       parentID: parentSessionID,
       title,
@@ -517,6 +532,15 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     const sessionID = createResult.data?.id;
     if (!sessionID) {
       throw new Error("failed to create child session: missing session id");
+    }
+
+    reviewState?.activeSessions.add(sessionID);
+    if (reviewState?.hardCapTimedOut) {
+      reviewState.activeSessions.delete(sessionID);
+      await ctx.client.session
+        .abort({ path: { id: sessionID } })
+        .catch(() => {});
+      throw new Error("council_review hard cap already triggered");
     }
 
     return sessionID;
@@ -577,9 +601,11 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     attempt: number;
     directory: string;
     reviewerPermission: PermissionRuleset;
+    reviewState: ReviewState;
   }): Promise<string> {
     const label = modelLabel(input.model);
     const startedAt = Date.now();
+    let sessionID: string | undefined;
     log("debug", "councillor attempt started", {
       model: label,
       attempt: input.attempt,
@@ -589,13 +615,13 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     try {
       const response = await raceWithTimeout(
         (async () => {
-          let sessionID: string | undefined;
           try {
             sessionID = await createChildSession(
               input.parentSessionID,
               `council: ${label} attempt ${input.attempt}`,
               input.directory,
               [...input.reviewerPermission],
+              input.reviewState,
             );
 
             return await promptAndExtract({
@@ -605,8 +631,11 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
               prompt: input.prompt,
             });
           } finally {
-            // Known limitation: indefinite hangs never reach finally; server-side session TTL is the fallback.
+            // Timeout can fire before session.create returns an id; in that race
+            // the timeout cleanup has nothing to abort, so this finally aborts
+            // the session if the create later resolves.
             if (sessionID) {
+              input.reviewState.activeSessions.delete(sessionID);
               await ctx.client.session
                 .abort({ path: { id: sessionID } })
                 .catch(() => {});
@@ -615,11 +644,18 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
         })(),
         input.timeoutMs,
         `${label} attempt ${input.attempt}`,
-        () => log("debug", "councillor attempt timed out", {
-          model: label,
-          attempt: input.attempt,
-          timeout_ms: input.timeoutMs,
-        }),
+        () => {
+          log("debug", "councillor attempt timed out", {
+            model: label,
+            attempt: input.attempt,
+            timeout_ms: input.timeoutMs,
+          });
+          if (sessionID) {
+            void ctx.client.session
+              .abort({ path: { id: sessionID } })
+              .catch(() => {});
+          }
+        },
       );
 
       log("debug", "councillor attempt ended", {
@@ -647,6 +683,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     model: ModelConfig;
     directory: string;
     reviewerPermission: PermissionRuleset;
+    reviewState: ReviewState;
   }): Promise<CouncillorSuccess> {
     try {
       const response = await runCouncillorAttempt({
@@ -656,6 +693,8 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
       });
       return { model: input.model, response, attempts: 1 };
     } catch (firstError) {
+      if (input.reviewState.hardCapTimedOut) throw firstError;
+
       log("debug", "councillor retry triggered", {
         model: modelLabel(input.model),
         error: errorMessage(firstError),
@@ -681,8 +720,10 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     successes: CouncillorSuccess[];
     failures: CouncillorFailure[];
     directory: string;
+    reviewState: ReviewState;
   }): Promise<string> {
     const startedAt = Date.now();
+    let sessionID: string | undefined;
     log("debug", "aggregator synthesis started", {
       model: councilConfig.aggregator_model
         ? modelLabel(councilConfig.aggregator_model)
@@ -695,13 +736,13 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     try {
       const response = await raceWithTimeout(
         (async () => {
-          let sessionID: string | undefined;
           try {
             sessionID = await createChildSession(
               input.parentSessionID,
               "council: aggregator synthesis",
               input.directory,
               aggregatorSessionPermission(),
+              input.reviewState,
             );
 
             return await promptAndExtract({
@@ -712,8 +753,11 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
               prompt: buildAggregatorPrompt(input),
             });
           } finally {
-            // Known limitation: indefinite hangs never reach finally; server-side session TTL is the fallback.
+            // Timeout can fire before session.create returns an id; in that race
+            // the timeout cleanup has nothing to abort, so this finally aborts
+            // the session if the create later resolves.
             if (sessionID) {
+              input.reviewState.activeSessions.delete(sessionID);
               await ctx.client.session
                 .abort({ path: { id: sessionID } })
                 .catch(() => {});
@@ -722,9 +766,16 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
         })(),
         councilConfig.timeouts.aggregator_ms,
         "aggregator synthesis",
-        () => log("debug", "aggregator synthesis timed out", {
-          timeout_ms: councilConfig.timeouts.aggregator_ms,
-        }),
+        () => {
+          log("debug", "aggregator synthesis timed out", {
+            timeout_ms: councilConfig.timeouts.aggregator_ms,
+          });
+          if (sessionID) {
+            void ctx.client.session
+              .abort({ path: { id: sessionID } })
+              .catch(() => {});
+          }
+        },
       );
 
       log("debug", "aggregator synthesis ended", {
@@ -745,6 +796,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   async function runCouncilReview(
     prompt: string,
     parentSessionID: string,
+    reviewState: ReviewState,
   ): Promise<string> {
     // Resolve parent directory once per review — avoids 2N+1 redundant session.get SDK calls.
     const directory = await parentDirectory(parentSessionID);
@@ -769,6 +821,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
         model,
         directory,
         reviewerPermission,
+        reviewState,
       }),
     );
 
@@ -801,6 +854,7 @@ ${formatFailureSummary(failures)}`;
       successes,
       failures,
       directory,
+      reviewState,
     });
   }
 
@@ -845,13 +899,27 @@ Use when you need adversarial review from multiple models. The tool returns the 
           if (!prompt) return "Error: Must provide a non-empty prompt";
 
           try {
+            // Hard-cap timeout: abort all tracked child sessions and set flag to prevent
+            // new session creation. Abort calls are fire-and-forget (idempotent, errors swallowed).
+            const reviewState: ReviewState = {
+              activeSessions: new Set<string>(),
+              hardCapTimedOut: false,
+            };
             return await raceWithTimeout(
-              runCouncilReview(prompt, toolContext.sessionID),
+              runCouncilReview(prompt, toolContext.sessionID, reviewState),
               councilConfig.timeouts.hard_cap_ms,
               "council_review",
-              () => log("debug", "hard cap triggered", {
-                timeout_ms: councilConfig.timeouts.hard_cap_ms,
-              }),
+              () => {
+                reviewState.hardCapTimedOut = true;
+                log("debug", "hard cap triggered", {
+                  timeout_ms: councilConfig.timeouts.hard_cap_ms,
+                });
+                for (const sessionID of reviewState.activeSessions) {
+                  void ctx.client.session
+                    .abort({ path: { id: sessionID } })
+                    .catch(() => {});
+                }
+              },
             );
           } catch (error) {
             return `Error: council_review failed: ${errorMessage(error)}`;

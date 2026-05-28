@@ -347,12 +347,13 @@ describe("structured logging", () => {
     }
   });
 
-  it("logs when the outer hard cap timeout triggers", async () => {
+  it("logs and aborts active child sessions when the outer hard cap timeout triggers", async () => {
     const appLog = vi.fn(async () => ({}));
     const session = createSessionMocks();
     const slowPrompt = deferred<Record<string, unknown>>();
-    session.create.mockResolvedValue({ data: { id: "slow-session" } });
+    createIds(session, ["hard-cap-a", "hard-cap-b"]);
     session.prompt.mockReturnValue(slowPrompt.promise);
+    session.messages.mockResolvedValue({ data: assistantMessages("late response") });
     const execute = await createExecute(
       session,
       validCouncil({
@@ -361,7 +362,7 @@ describe("structured logging", () => {
           councillor_ms: 1_000,
           councillor_retry_ms: 1_000,
           aggregator_ms: 1_000,
-          hard_cap_ms: 1,
+          hard_cap_ms: 50,
         },
       }),
       "/fallback-directory",
@@ -381,6 +382,9 @@ describe("structured logging", () => {
         message: "hard cap triggered",
       }),
     });
+    expect(abortIds(session)).toEqual(
+      expect.arrayContaining(["hard-cap-a", "hard-cap-b"]),
+    );
     slowPrompt.resolve({});
   });
 
@@ -1504,7 +1508,7 @@ describe("session.abort cleanup", () => {
     );
   });
 
-  it("aborts a timed-out session after the underlying prompt eventually settles", async () => {
+  it("aborts a timed-out session immediately without waiting for the underlying prompt to settle", async () => {
     const session = createSessionMocks();
     const slowPrompt = deferred<Record<string, unknown>>();
     session.create
@@ -1532,12 +1536,113 @@ describe("session.abort cleanup", () => {
 
     expect(result).toContain("provider-a/model-a (2 attempts)");
     expect(abortIds(session)).toContain("retry-session");
-    expect(abortIds(session)).not.toContain("slow-session");
+    expect(abortIds(session)).toContain("slow-session");
 
     slowPrompt.resolve({});
 
     await eventually(() => {
       expect(abortIds(session)).toContain("slow-session");
+    });
+  });
+
+  it("aborts a councillor session when create resolves after the attempt timeout", async () => {
+    const session = createSessionMocks();
+    const slowCreate = deferred<{ data: { id: string } }>();
+    session.create.mockImplementation(() => {
+      const callNumber = session.create.mock.calls.length;
+      if (callNumber === 1) return slowCreate.promise;
+      if (callNumber === 2) return Promise.resolve({ data: { id: "other-councillor" } });
+      if (callNumber === 3) return Promise.resolve({ data: { id: "retry-councillor" } });
+      if (callNumber === 4) return Promise.resolve({ data: { id: "aggregator-session" } });
+      return Promise.resolve({ error: "unexpected create" });
+    });
+    session.prompt.mockResolvedValue({});
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "other-councillor") {
+        return { data: assistantMessages("other response") };
+      }
+      if (input.path.id === "retry-councillor") {
+        return { data: assistantMessages("retry response") };
+      }
+      if (input.path.id === "aggregator-session") {
+        return { data: assistantMessages("aggregated response") };
+      }
+      return { data: assistantMessages("late response") };
+    });
+    const execute = await createExecute(session, validCouncil({
+      timeouts: {
+        councillor_ms: 50,
+        councillor_retry_ms: 1_000,
+        aggregator_ms: 1_000,
+        hard_cap_ms: 5_000,
+      },
+    }));
+
+    const resultPromise = execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    await eventually(() => {
+      expect(session.create.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(abortIds(session)).not.toContain("slow-created-session");
+    });
+
+    slowCreate.resolve({ data: { id: "slow-created-session" } });
+
+    const result = await resultPromise;
+
+    expect(result).toBe("aggregated response");
+    expect(abortIds(session)).toEqual(
+      expect.arrayContaining([
+        "other-councillor",
+        "retry-councillor",
+        "aggregator-session",
+      ]),
+    );
+    await eventually(() => {
+      expect(abortIds(session)).toContain("slow-created-session");
+    });
+  });
+
+  it("aborts the aggregator child session when aggregator synthesis times out", async () => {
+    const session = createSessionMocks();
+    const slowAggregatorPrompt = deferred<Record<string, unknown>>();
+    createIds(session, ["councillor-a", "councillor-b", "aggregator-session"]);
+    session.prompt.mockImplementation((input: { path: { id: string } }) => {
+      if (input.path.id === "aggregator-session") return slowAggregatorPrompt.promise;
+      return Promise.resolve({});
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "councillor-a") {
+        return { data: assistantMessages("response a") };
+      }
+      if (input.path.id === "councillor-b") {
+        return { data: assistantMessages("response b") };
+      }
+      return { data: assistantMessages("late aggregate") };
+    });
+    const execute = await createExecute(session, validCouncil({
+      timeouts: {
+        councillor_ms: 1_000,
+        councillor_retry_ms: 1_000,
+        aggregator_ms: 50,
+        hard_cap_ms: 5_000,
+      },
+    }));
+
+    const result = await execute(
+      { prompt: "review this" },
+      { sessionID: "parent-session" },
+    );
+
+    expect(result).toContain("Error: council_review failed:");
+    expect(result).toContain("aggregator synthesis timed out");
+    expect(abortIds(session)).toContain("aggregator-session");
+
+    slowAggregatorPrompt.resolve({});
+    await eventually(() => {
+      expect(abortIds(session)).toContain("aggregator-session");
     });
   });
 
