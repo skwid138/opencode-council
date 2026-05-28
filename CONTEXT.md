@@ -44,6 +44,21 @@ _Avoid_: step timeout, inner timeout
 The default hard cap derived from `councillor + retry + aggregator + 30s buffer` when no explicit `hard_cap_ms` is configured.
 _Avoid_: auto timeout, dynamic cap
 
+**#28037 workaround (catch-all allows)**:
+Child sessions cannot prompt the user interactively (anomalyco/opencode#28037) — `ask` permissions hang the TUI. The plugin prepends catch-all `{bash, *, allow}` and `{external_directory, *, allow}` rules as the lowest-priority base. Workspace `ask` values are stripped by `workspacePatternRules` before layering, so `ask` cannot re-emerge. This is intentionally permissive; workspace deny rules restrict access back down.
+
+**Permission layering**:
+Child-session permission rulesets are constructed in append order. OpenCode evaluates rules last-match-wins (confirmed in opencode source `config.ts`):
+1. Catch-all allows (#28037 workaround) — lowest priority
+2. Workspace deny/allow rules (from cached permission's `bash` and `external_directory`; `ask` values stripped)
+3. User `reviewer_permission` / `aggregator_permission` overrides — highest priority
+
+**Cached permission**:
+Workspace permission config captured from the config hook at plugin startup. The config hook is guaranteed to run before any tool execution, so this value is always populated when `buildReviewerRuleset` is called. OpenCode does not hot-reload config; the value remains valid for the plugin's lifetime.
+
+**Active session tracking**:
+A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by hard-cap timeout to abort all in-flight sessions. Abort calls are fire-and-forget and idempotent — double-aborts are tolerated.
+
 ## Relationships
 
 - A **council_review** invocation spawns one **councillor** per entry in the **models array**.
