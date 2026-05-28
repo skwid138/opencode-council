@@ -489,6 +489,20 @@ describe("config hook bundled agents", () => {
     expect(REVIEWER_PERMISSION).toHaveProperty("write", "deny");
   });
 
+  it("bundled reviewer prompt encourages read-only investigation with available tools", () => {
+    expect(REVIEWER_PROMPT).toEqual(expect.stringContaining("read"));
+    expect(REVIEWER_PROMPT).toEqual(expect.stringContaining("glob"));
+    expect(REVIEWER_PROMPT).toEqual(expect.stringContaining("grep"));
+    expect(REVIEWER_PROMPT).toEqual(expect.stringContaining("bash"));
+    expect(REVIEWER_PROMPT.toLowerCase()).toEqual(
+      expect.stringContaining("read-only"),
+    );
+    expect(REVIEWER_PROMPT).not.toEqual(expect.stringContaining("Do not execute"));
+    expect(REVIEWER_PROMPT).not.toEqual(
+      expect.stringContaining("Review only the material supplied"),
+    );
+  });
+
   it("injects bundled agents when reviewer and aggregator are not user-specified", async () => {
     const hooks = (await CouncilToolPlugin(
       createContext(createSessionMocks()) as never,
@@ -503,6 +517,7 @@ describe("config hook bundled agents", () => {
         description: "Council plugin adversarial code reviewer",
         mode: "subagent",
         hidden: true,
+        temperature: 0.3,
         prompt: REVIEWER_PROMPT,
         permission: REVIEWER_PERMISSION,
       },
@@ -510,10 +525,29 @@ describe("config hook bundled agents", () => {
         description: "Council plugin structural aggregator",
         mode: "subagent",
         hidden: true,
+        temperature: 0,
         prompt: AGGREGATOR_PROMPT,
         permission: AGGREGATOR_PERMISSION,
       },
     });
+  });
+
+  it("uses reviewer_temperature to override the bundled reviewer agent temperature", async () => {
+    const hooks = (await CouncilToolPlugin(
+      createContext(createSessionMocks()) as never,
+      { council: { models: [MODEL_A, MODEL_B], reviewer_temperature: 1.5 } } as never,
+    )) as unknown as { config: (config: Record<string, unknown>) => Promise<void> };
+    const config: Record<string, unknown> = {};
+
+    await hooks.config(config);
+
+    expect(config.agent).toEqual(
+      expect.objectContaining({
+        "council-plugin-reviewer": expect.objectContaining({
+          temperature: 1.5,
+        }),
+      }),
+    );
   });
 
   it("does not inject bundled agents when reviewer and aggregator are user-specified", async () => {
@@ -526,6 +560,30 @@ describe("config hook bundled agents", () => {
     await hooks.config(config);
 
     expect(config.agent).toEqual({ existing: { mode: "subagent" } });
+  });
+
+  it("ignores reviewer_temperature when the reviewer agent is user-specified", async () => {
+    const hooks = (await CouncilToolPlugin(
+      createContext(createSessionMocks()) as never,
+      {
+        council: {
+          models: [MODEL_A, MODEL_B],
+          reviewer: "my-reviewer",
+          reviewer_temperature: 1.5,
+        },
+      } as never,
+    )) as unknown as { config: (config: Record<string, unknown>) => Promise<void> };
+    const config: Record<string, unknown> = {
+      agent: { "my-reviewer": { mode: "subagent" }, existing: { mode: "subagent" } },
+    };
+
+    await hooks.config(config);
+
+    expect(config.agent).toEqual(
+      expect.objectContaining({
+        "my-reviewer": { mode: "subagent" },
+      }),
+    );
   });
 });
 
@@ -578,6 +636,37 @@ describe("parseCouncilConfig", () => {
 
     expect(config.reviewer).toBe("council-plugin-reviewer");
     expect(config.aggregator).toBe("council-plugin-aggregator");
+  });
+
+  it("validates reviewer_temperature as a finite number in the supported range", () => {
+    expect(
+      validateCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } })
+        .reviewer_temperature,
+    ).toBeNull();
+
+    for (const reviewerTemperature of [0, 0.3, 1.5, 2]) {
+      expect(
+        validateCouncilConfig({
+          council: validCouncil({ reviewer_temperature: reviewerTemperature }),
+        }).reviewer_temperature,
+      ).toBe(reviewerTemperature);
+    }
+
+    for (const reviewerTemperature of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -1,
+      3,
+      "0.5",
+      true,
+      {},
+    ]) {
+      expect(() =>
+        validateCouncilConfig({
+          council: validCouncil({ reviewer_temperature: reviewerTemperature }),
+        }),
+      ).toThrow("council.reviewer_temperature must be a finite number between 0 and 2");
+    }
   });
 
   it("throws when models are missing", () => {
