@@ -77,6 +77,7 @@ Full config with all options:
           "reviewer": "my-reviewer",
           "aggregator": "my-aggregator",
           "debug": false,
+          "reviewer_temperature": 0.3,
           "reviewer_permission": {
             "bash": {
               "*": "allow",
@@ -103,6 +104,8 @@ Full config with all options:
 }
 ```
 
+Note: `reviewer_temperature` is shown for option reference; it only affects the injected bundled reviewer, so omit `reviewer` or define temperature on your custom reviewer agent if you use one.
+
 ### Required fields
 
 | Field | Description |
@@ -116,6 +119,7 @@ Full config with all options:
 | `council.reviewer` | `council-plugin-reviewer` | Name of the opencode agent to use as each reviewer |
 | `council.aggregator` | `council-plugin-aggregator` | Name of the opencode agent to use as the aggregator |
 | `council.debug` | `false` | Enable structured debug logs through `ctx.client.app.log()` |
+| `council.reviewer_temperature` | `null` (uses bundled default `0.3`) | Optional temperature for the injected bundled reviewer agent. Must be a finite number from `0` to `2`. Ignored when `council.reviewer` names a custom agent. |
 | `council.reviewer_permission` | Catch-all `bash`/`external_directory` allows plus workspace inherited rules | Extra session-level reviewer rules. Values may be flat (`"bash": "deny"`) or nested pattern maps (`"bash": { "sudo *": "deny" }`). Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_permission` | none | Optional session-level aggregator rules. No workspace inheritance or catch-all allows are applied to the aggregator. Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_model` | First available model | Specific model for the aggregator agent |
@@ -151,6 +155,8 @@ If `reviewer` or `aggregator` is omitted, the plugin injects hidden `mode: "suba
 
 - `council-plugin-reviewer` — an adversarial reviewer that tiers findings as Must Address, Should Address, or Unrelated Observations and returns APPROVE / REVISE / REJECT.
 - `council-plugin-aggregator` — a structural aggregator that deduplicates reviewer responses by agreement level without issuing its own verdict.
+
+Bundled agent temperatures are set explicitly: the reviewer defaults to `0.3` for some council diversity, and the aggregator uses `0` for deterministic synthesis. Set `council.reviewer_temperature` to override the injected bundled reviewer temperature; the aggregator temperature is not configurable. If you specify a custom `reviewer`, define any desired temperature on that agent instead.
 
 If you specify `reviewer` or `aggregator`, that name must reference an opencode agent defined in your config (`~/.config/opencode/agent/` or `.opencode/agent/`). Custom agents fully replace the corresponding bundled agent.
 
