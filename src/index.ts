@@ -46,6 +46,7 @@ type CouncilConfig = {
   debug: boolean;
   models: ModelConfig[];
   aggregator_model: ModelConfig | null;
+  reviewer_temperature: number | null;
   reviewer_permission: PermissionOverrideConfig | null;
   aggregator_permission: PermissionOverrideConfig | null;
   timeouts: TimeoutConfig;
@@ -294,6 +295,15 @@ function readTimeoutMs(
   return Math.max(1, Math.round(raw));
 }
 
+function readReviewerTemperature(source: Record<string, unknown>): number | null {
+  const raw = source.reviewer_temperature;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 2) {
+    throw new Error("council.reviewer_temperature must be a finite number between 0 and 2");
+  }
+  return raw;
+}
+
 export function parseCouncilConfig(
   raw: unknown,
   warn: WarningLogger = () => {},
@@ -355,6 +365,7 @@ export function parseCouncilConfig(
     debug: source.debug === true,
     models,
     aggregator_model: aggregatorModel,
+    reviewer_temperature: readReviewerTemperature(source),
     reviewer_permission: readPermissionOverride(source.reviewer_permission, warn),
     aggregator_permission: readPermissionOverride(source.aggregator_permission, warn),
     timeouts: {
@@ -869,6 +880,7 @@ ${formatFailureSummary(failures)}`;
           description: "Council plugin adversarial code reviewer",
           mode: "subagent",
           hidden: true,
+          temperature: councilConfig.reviewer_temperature ?? 0.3,
           prompt: REVIEWER_PROMPT,
           permission: REVIEWER_PERMISSION,
         };
@@ -879,6 +891,7 @@ ${formatFailureSummary(failures)}`;
           description: "Council plugin structural aggregator",
           mode: "subagent",
           hidden: true,
+          temperature: 0,
           prompt: AGGREGATOR_PROMPT,
           permission: AGGREGATOR_PERMISSION,
         };
