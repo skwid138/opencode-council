@@ -14,6 +14,7 @@ import {
   parseCouncilConfig,
   REVIEWER_TEMPERATURE_IGNORED_WARNING,
 } from "./config";
+import { runCouncillor } from "./councillor";
 import { createLogger, errorMessage, modelLabel } from "./logging";
 import {
   aggregatorSessionPermission,
@@ -26,7 +27,7 @@ import {
   REVIEWER_PERMISSION,
   REVIEWER_PROMPT,
 } from "./prompts";
-import { createChildSession, parentDirectory, promptAndExtract } from "./session";
+import { parentDirectory } from "./session";
 import { raceWithTimeout } from "./timeout";
 import {
   BUNDLED_AGGREGATOR_AGENT,
@@ -34,8 +35,6 @@ import {
   type CouncilPluginOptions,
   type CouncillorFailure,
   type CouncillorSuccess,
-  type ModelConfig,
-  type PermissionRuleset,
   type ReviewState,
 } from "./types";
 
@@ -60,128 +59,6 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
   // is always populated when buildReviewerRuleset is called.
   let cachedPermission: unknown;
 
-  async function runCouncillorAttempt(input: {
-    parentSessionID: string;
-    prompt: string;
-    model: ModelConfig;
-    timeoutMs: number;
-    attempt: number;
-    directory: string;
-    reviewerPermission: PermissionRuleset;
-    reviewState: ReviewState;
-  }): Promise<string> {
-    const label = modelLabel(input.model);
-    const startedAt = Date.now();
-    let sessionID: string | undefined;
-    log("debug", "councillor attempt started", {
-      model: label,
-      attempt: input.attempt,
-      timeout_ms: input.timeoutMs,
-    });
-
-    try {
-      const response = await raceWithTimeout(
-        (async () => {
-          try {
-            sessionID = await createChildSession(
-              ctx,
-              input.parentSessionID,
-              `council: ${label} attempt ${input.attempt}`,
-              input.directory,
-              [...input.reviewerPermission],
-              input.reviewState,
-            );
-
-            return await promptAndExtract(ctx, {
-              sessionID,
-              agent: councilConfig.reviewer,
-              model: input.model,
-              prompt: input.prompt,
-            });
-          } finally {
-            // Timeout can fire before session.create returns an id; in that race
-            // the timeout cleanup has nothing to abort, so this finally aborts
-            // the session if the create later resolves.
-            if (sessionID) {
-              input.reviewState.activeSessions.delete(sessionID);
-              await ctx.client.session
-                .abort({ path: { id: sessionID } })
-                .catch(() => {});
-            }
-          }
-        })(),
-        input.timeoutMs,
-        `${label} attempt ${input.attempt}`,
-        () => {
-          log("debug", "councillor attempt timed out", {
-            model: label,
-            attempt: input.attempt,
-            timeout_ms: input.timeoutMs,
-          });
-          if (sessionID) {
-            void ctx.client.session
-              .abort({ path: { id: sessionID } })
-              .catch(() => {});
-          }
-        },
-      );
-
-      log("debug", "councillor attempt ended", {
-        model: label,
-        attempt: input.attempt,
-        success: true,
-        duration_ms: Date.now() - startedAt,
-      });
-      return response;
-    } catch (error) {
-      log("debug", "councillor attempt ended", {
-        model: label,
-        attempt: input.attempt,
-        success: false,
-        duration_ms: Date.now() - startedAt,
-        error: errorMessage(error),
-      });
-      throw error;
-    }
-  }
-
-  async function runCouncillor(input: {
-    parentSessionID: string;
-    prompt: string;
-    model: ModelConfig;
-    directory: string;
-    reviewerPermission: PermissionRuleset;
-    reviewState: ReviewState;
-  }): Promise<CouncillorSuccess> {
-    try {
-      const response = await runCouncillorAttempt({
-        ...input,
-        timeoutMs: councilConfig.timeouts.councillor_ms,
-        attempt: 1,
-      });
-      return { model: input.model, response, attempts: 1 };
-    } catch (firstError) {
-      if (input.reviewState.hardCapTimedOut) throw firstError;
-
-      log("debug", "councillor retry triggered", {
-        model: modelLabel(input.model),
-        error: errorMessage(firstError),
-      });
-      try {
-        const response = await runCouncillorAttempt({
-          ...input,
-          timeoutMs: councilConfig.timeouts.councillor_retry_ms,
-          attempt: 2,
-        });
-        return { model: input.model, response, attempts: 2 };
-      } catch (retryError) {
-        throw new Error(
-          `first attempt failed: ${errorMessage(firstError)}; retry failed: ${errorMessage(retryError)}`,
-        );
-      }
-    }
-  }
-
   async function runCouncilReview(
     prompt: string,
     parentSessionID: string,
@@ -204,7 +81,7 @@ const CouncilToolPlugin: Plugin = async (ctx, options?: PluginOptions) => {
     });
 
     const councillorPromises = councilConfig.models.map((model) =>
-      runCouncillor({
+      runCouncillor(ctx, councilConfig, log, {
         parentSessionID,
         prompt,
         model,
