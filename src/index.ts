@@ -13,6 +13,7 @@ import {
   REVIEWER_PERMISSION,
   REVIEWER_PROMPT,
 } from "./prompts";
+import { raceWithTimeout } from "./timeout";
 import {
   BUNDLED_AGGREGATOR_AGENT,
   BUNDLED_REVIEWER_AGENT,
@@ -328,38 +329,6 @@ function modelLabel(model: ModelConfig): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function formatSeconds(ms: number): string {
-  return `${Math.round(ms / 1000)}s`;
-}
-
-/**
- * Race a promise against a timeout. Does NOT cancel the underlying promise —
- * cleanup must be handled via the optional `onTimeout` callback or the caller's
- * own finally/cleanup logic.
- */
-export async function raceWithTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  label: string,
-  onTimeout?: () => void,
-): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => {
-      onTimeout?.();
-      reject(
-        new Error(`${label} timed out after ${formatSeconds(timeoutMs)}`),
-      );
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
 }
 
 function buildAggregatorPrompt(input: {
@@ -890,5 +859,6 @@ Use when you need adversarial review from multiple models. The tool returns the 
 };
 
 export { CouncilToolPlugin };
+export { raceWithTimeout };
 
 export default { server: CouncilToolPlugin };
