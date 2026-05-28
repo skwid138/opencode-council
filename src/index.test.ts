@@ -191,6 +191,17 @@ describe("debug source resolution", () => {
 
     expect(createLogger).toHaveBeenCalledWith(context, true);
   });
+
+  it("disables debug logging when no source is set", async () => {
+    delete process.env.COUNCIL_DEBUG;
+    const context = createContext();
+
+    await CouncilToolPlugin(context as never, {
+      council: { models: [MODEL_A, MODEL_B] },
+    } as never);
+
+    expect(createLogger).toHaveBeenCalledWith(context, false);
+  });
 });
 
 describe("package.json exports", () => {
