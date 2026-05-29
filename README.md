@@ -253,17 +253,17 @@ A typical aggregated response:
 │ VERDICT: REVISE                                 │
 │                                                 │
 │ ▸ Must Address (agreed by 2/2):                 │
-│   • Missing null check on `user.preferences`   │
-│     before destructuring (line 42)             │
-│   • SQL query uses string interpolation —      │
-│     switch to parameterized query              │
+│   • Missing null check on `user.preferences`    │
+│     before destructuring (line 42)              │
+│   • SQL query uses string interpolation —       │
+│     switch to parameterized query               │
 │                                                 │
-│ ▸ Should Address (1/2 flagged):                │
-│   • Function `processData` exceeds 80 lines — │
-│     consider extracting validation logic       │
+│ ▸ Should Address (1/2 flagged):                 │
+│   • Function `processData` exceeds 80 lines —   │
+│     consider extracting validation logic        │
 │                                                 │
-│ ▸ Unrelated Observations:                      │
-│   • Unused import `lodash` on line 3           │
+│ ▸ Unrelated Observations:                       │
+│   • Unused import `lodash` on line 3            │
 │                                                 │
 └─────────────────────────────────────────────────┘
 ```
