@@ -270,6 +270,61 @@ A typical aggregated response:
 
 *Output format depends on the aggregator agent. The bundled aggregator produces Markdown with tiered findings.*
 
+## Development
+
+Install dependencies:
+
+```sh
+npm install
+```
+
+Run tests:
+
+```sh
+npm test
+```
+
+Run tests with coverage:
+
+```sh
+npm run test:coverage
+```
+
+Type-check:
+
+```sh
+npm run typecheck
+```
+
+Build the package:
+
+```sh
+npm run build
+```
+
+The build emits ESM artifacts and declaration files into `dist/`.
+
+<!-- keep in sync with opencode-council and opencode-tui -->
+### Commit messages
+
+This repo uses [Conventional Commits](https://www.conventionalcommits.org/). A local
+[husky](https://typicode.github.io/husky/) hook runs
+[commitlint](https://commitlint.js.org/) on every commit, and PR titles are validated
+by GitHub Actions (`.github/workflows/pr-title.yml`) since this repo squash-merges
+with the PR title as the commit subject.
+
+Allowed types: `feat`, `fix`, `perf`, `refactor` (patch), `docs`, `chore`, `ci`,
+`style`, `test`, `build`, `revert`.
+
+Notes:
+- Use `git commit --no-verify` to bypass the hook in unusual cases (e.g. WIP commits
+  you'll squash later).
+- A `BREAKING CHANGE:` footer in the commit body triggers a major release regardless
+  of the type prefix — use deliberately.
+- The conventional prefix governs the release type, but the human is responsible for
+  matching prefix to actual change (a `feat:` whose diff is a README typo will still
+  publish a minor release).
+
 ## Security
 
 - Bundled reviewer and aggregator permissions are defined on the injected agents and contain no `ask` values.

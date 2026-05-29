@@ -23,15 +23,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "prepare": "husky || true"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.15.0"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
     "@opencode-ai/plugin": "^1.15.0",
     "@opencode-ai/sdk": "^1.15.0",
     "@types/node": "^22.0.0",
+    "husky": "^9.1.7",
     "semantic-release": "^25.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.7"

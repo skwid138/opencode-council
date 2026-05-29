@@ -1,4 +1,5 @@
 node_modules/
 dist/
 *.tgz
+.husky/_/
 .project-plans
