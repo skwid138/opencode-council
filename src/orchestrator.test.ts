@@ -75,7 +75,6 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 1_000,
-      councillor_retry_ms: 1_000,
       aggregator_ms: 1_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 5_000,
@@ -129,8 +128,7 @@ describe("runCouncilReview", () => {
     const session = createSessionMocks();
     session.create
       .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
-      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
-      .mockResolvedValueOnce({ data: { id: "reviewer-b-retry" } });
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } });
     session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
       if (input.path.id === "reviewer-a") return {};
       return { error: "failed" };
@@ -147,8 +145,8 @@ describe("runCouncilReview", () => {
     );
 
     expect(result).toContain("fewer than 2 successful councillor responses (1/2)");
-    expect(result).toContain("provider-a/model-a (1 attempt)");
-    expect(session.create).toHaveBeenCalledTimes(3);
+    expect(result).toContain("provider-a/model-a");
+    expect(session.create).toHaveBeenCalledTimes(2);
     expect(session.prompt).not.toHaveBeenCalledWith(
       expect.objectContaining({ body: expect.objectContaining({ agent: "aggregator" }) }),
     );
@@ -158,8 +156,7 @@ describe("runCouncilReview", () => {
     const session = createSessionMocks();
     session.create
       .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
-      .mockResolvedValueOnce({ error: "create failed" })
-      .mockResolvedValueOnce({ error: "retry create failed" });
+      .mockResolvedValueOnce({ error: "create failed" });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response a") });
 
@@ -299,13 +296,6 @@ describe("runCouncilReview", () => {
     expect(aggregatorPrompt(session)).toContain("## Aborted (quorum reached)");
     expect(aggregatorPrompt(session)).toContain("- provider-c/model-c");
     expect(abortIds(session)).toContain("reviewer-c");
-    expect(
-      session.create.mock.calls.some(([input]) =>
-        ((input as { body: { title: string } }).body.title).includes(
-          "provider-c/model-c attempt 2",
-        ),
-      ),
-    ).toBe(false);
 
     laggardPrompt.resolve({});
   });
@@ -353,7 +343,7 @@ describe("runCouncilReview", () => {
     promptC.resolve({});
 
     await expect(result).resolves.toBe("aggregated response");
-    expect(aggregatorPrompt(session)).toContain("provider-c/model-c (1 attempt)");
+    expect(aggregatorPrompt(session)).toContain("provider-c/model-c");
     expect(aggregatorPrompt(session)).not.toContain("Aborted");
   });
 
@@ -460,6 +450,7 @@ describe("runCouncilReview", () => {
 
     const observed = await observedResult;
     expect(observed).toBeInstanceOf(Error);
+    if (!(observed instanceof Error)) throw new Error("expected Error result");
     expect(observed.message).toContain("council_review timed out");
     expect(abortIds(session)).toEqual(
       expect.arrayContaining(["reviewer-a", "reviewer-b", "reviewer-c"]),

@@ -12,7 +12,6 @@ export type CouncilPluginOptions = {
 
 export type TimeoutConfig = {
   councillor_ms: number;
-  councillor_retry_ms: number;
   aggregator_ms: number;
   quorum_grace_ms: number;
   hard_cap_ms: number;

@@ -7,7 +7,7 @@ import {
   formatFailureSummary,
   synthesizeWithAggregator,
 } from "./aggregator";
-import type { CouncilConfig, ReviewState } from "./types";
+import type { CouncilConfig, CouncillorSuccess, ReviewState } from "./types";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
@@ -46,6 +46,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function success(model: typeof MODEL_A, response: string): CouncillorSuccess {
+  return { model, response, attempts: 1 } as CouncillorSuccess;
+}
+
 async function eventually(assertion: () => void, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
@@ -76,7 +80,6 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 180_000,
-      councillor_retry_ms: 90_000,
       aggregator_ms: 120_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 420_000,
@@ -86,20 +89,20 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
 }
 
 describe("buildAggregatorPrompt", () => {
-  it("formats the original prompt, success attempts, failures, and reviewer responses", () => {
+  it("formats the original prompt, successes, failures, and reviewer responses", () => {
     const prompt = buildAggregatorPrompt({
       originalPrompt: "review this",
       successes: [
-        { model: MODEL_A, response: "response a", attempts: 1 },
-        { model: MODEL_B, response: "response b", attempts: 2 },
+        success(MODEL_A, "response a"),
+        success(MODEL_B, "response b"),
       ],
       failures: [{ model: { providerID: "provider-c", modelID: "model-c" }, error: "failed" }],
       aborted: [],
     });
 
     expect(prompt).toContain("# Original review prompt\n\nreview this");
-    expect(prompt).toContain("- provider-a/model-a (1 attempt)");
-    expect(prompt).toContain("- provider-b/model-b (2 attempts)");
+    expect(prompt).toContain("- provider-a/model-a");
+    expect(prompt).toContain("- provider-b/model-b");
     expect(prompt).toContain("- provider-c/model-c: failed");
     expect(prompt).toContain("## Reviewer 1: provider-a/model-a");
     expect(prompt).toContain("response b");
@@ -109,7 +112,7 @@ describe("buildAggregatorPrompt", () => {
     expect(
       buildAggregatorPrompt({
         originalPrompt: "review this",
-        successes: [{ model: MODEL_A, response: "response a", attempts: 1 }],
+        successes: [success(MODEL_A, "response a")],
         failures: [],
         aborted: [],
       }),
@@ -150,8 +153,8 @@ describe("synthesizeWithAggregator", () => {
         parentSessionID: "parent",
         originalPrompt: "review this",
         successes: [
-          { model: MODEL_A, response: "response a", attempts: 1 },
-          { model: MODEL_B, response: "response b", attempts: 1 },
+          success(MODEL_A, "response a"),
+          success(MODEL_B, "response b"),
         ],
         failures: [],
         aborted: [],
@@ -197,8 +200,8 @@ describe("synthesizeWithAggregator", () => {
         parentSessionID: "parent",
         originalPrompt: "review this",
         successes: [
-          { model: MODEL_A, response: "response a", attempts: 1 },
-          { model: MODEL_B, response: "response b", attempts: 1 },
+          success(MODEL_A, "response a"),
+          success(MODEL_B, "response b"),
         ],
         failures: [],
         aborted: [],
@@ -231,8 +234,8 @@ describe("synthesizeWithAggregator", () => {
           parentSessionID: "parent",
           originalPrompt: "review this",
           successes: [
-            { model: MODEL_A, response: "response a", attempts: 1 },
-            { model: MODEL_B, response: "response b", attempts: 1 },
+            success(MODEL_A, "response a"),
+            success(MODEL_B, "response b"),
           ],
           failures: [],
           aborted: [],

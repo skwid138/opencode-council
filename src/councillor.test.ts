@@ -70,7 +70,6 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 120_000,
-      councillor_retry_ms: 90_000,
       aggregator_ms: 120_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 360_000,
@@ -82,7 +81,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
 describe("runCouncillorAttempt", () => {
   it("creates, prompts, extracts, and aborts a councillor session", async () => {
     const session = createSessionMocks();
-    session.create.mockResolvedValueOnce({ data: { id: "attempt-session" } });
+    session.create.mockResolvedValueOnce({ data: { id: "request-session" } });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
     const reviewState: ReviewState = {
@@ -97,7 +96,6 @@ describe("runCouncillorAttempt", () => {
         prompt: "review this",
         model: MODEL_A,
         timeoutMs: 1_000,
-        attempt: 1,
         directory: "/dir",
         reviewerPermission: [{ permission: "bash", pattern: "*", action: "allow" }],
         reviewState,
@@ -107,19 +105,19 @@ describe("runCouncillorAttempt", () => {
     expect(session.create).toHaveBeenCalledWith({
       body: {
         parentID: "parent",
-        title: "council: provider-a/model-a attempt 1",
+        title: "council: provider-a/model-a",
         permission: [{ permission: "bash", pattern: "*", action: "allow" }],
       },
       query: { directory: "/dir" },
     });
     expect(session.prompt).toHaveBeenCalledWith(
       expect.objectContaining({
-        path: { id: "attempt-session" },
+        path: { id: "request-session" },
         body: expect.objectContaining({ agent: "reviewer", model: MODEL_A }),
       }),
     );
-    expect(session.abort).toHaveBeenCalledWith({ path: { id: "attempt-session" } });
-    expect(reviewState.activeSessions.has("attempt-session")).toBe(false);
+    expect(session.abort).toHaveBeenCalledWith({ path: { id: "request-session" } });
+    expect(reviewState.activeSessions.has("request-session")).toBe(false);
   });
 
   it("aborts a timed-out session immediately and logs the timeout", async () => {
@@ -136,16 +134,14 @@ describe("runCouncillorAttempt", () => {
         prompt: "review this",
         model: MODEL_A,
         timeoutMs: 50,
-        attempt: 1,
         directory: "/dir",
         reviewerPermission: [],
         reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       }),
-    ).rejects.toThrow("provider-a/model-a attempt 1 timed out");
+    ).rejects.toThrow("provider-a/model-a timed out");
 
-    expect(log).toHaveBeenCalledWith("debug", "councillor attempt timed out", {
+    expect(log).toHaveBeenCalledWith("debug", "councillor request timed out", {
       model: "provider-a/model-a",
-      attempt: 1,
       timeout_ms: 50,
     });
     expect(session.abort).toHaveBeenCalledWith({ path: { id: "slow-session" } });
@@ -153,7 +149,7 @@ describe("runCouncillorAttempt", () => {
     slowPrompt.resolve({});
   });
 
-  it("aborts a councillor session when create resolves after the attempt timeout", async () => {
+  it("aborts a councillor session when create resolves after the request timeout", async () => {
     const session = createSessionMocks();
     const slowCreate = deferred<{ data: { id: string } }>();
     session.create.mockReturnValueOnce(slowCreate.promise);
@@ -169,14 +165,13 @@ describe("runCouncillorAttempt", () => {
         prompt: "review this",
         model: MODEL_A,
         timeoutMs: 50,
-        attempt: 1,
         directory: "/dir",
         reviewerPermission: [],
         reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       },
     );
 
-    await expect(resultPromise).rejects.toThrow("provider-a/model-a attempt 1 timed out");
+    await expect(resultPromise).rejects.toThrow("provider-a/model-a timed out");
     expect(session.abort).not.toHaveBeenCalledWith({ path: { id: "late-session" } });
 
     slowCreate.resolve({ data: { id: "late-session" } });
@@ -187,7 +182,7 @@ describe("runCouncillorAttempt", () => {
 });
 
 describe("runCouncillor", () => {
-  it("returns success after one attempt", async () => {
+  it("returns success after one request", async () => {
     const session = createSessionMocks();
     session.create.mockResolvedValueOnce({ data: { id: "first-session" } });
     session.prompt.mockResolvedValueOnce({});
@@ -205,40 +200,10 @@ describe("runCouncillor", () => {
     ).resolves.toEqual({ model: MODEL_A, response: "response", attempts: 1 });
   });
 
-  it("retries a failed first attempt and records retry success", async () => {
+  it("propagates the single-attempt failure", async () => {
     const session = createSessionMocks();
-    session.create
-      .mockResolvedValueOnce({ data: { id: "first-session" } })
-      .mockResolvedValueOnce({ data: { id: "retry-session" } });
-    session.prompt.mockResolvedValueOnce({ error: "first failed" }).mockResolvedValueOnce({});
-    session.messages.mockResolvedValueOnce({ data: assistantMessages("retry response") });
-    const log = vi.fn();
-
-    await expect(
-      runCouncillor(createContext(session) as never, councilConfig(), log, {
-        parentSessionID: "parent",
-        prompt: "review this",
-        model: MODEL_A,
-        directory: "/dir",
-        reviewerPermission: [],
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
-      }),
-    ).resolves.toEqual({ model: MODEL_A, response: "retry response", attempts: 2 });
-
-    expect(log).toHaveBeenCalledWith("debug", "councillor retry triggered", {
-      model: "provider-a/model-a",
-      error: 'prompt failed: "first failed"',
-    });
-  });
-
-  it("reports both first and retry failures", async () => {
-    const session = createSessionMocks();
-    session.create
-      .mockResolvedValueOnce({ data: { id: "first-session" } })
-      .mockResolvedValueOnce({ data: { id: "retry-session" } });
-    session.prompt
-      .mockResolvedValueOnce({ error: "first failed" })
-      .mockResolvedValueOnce({ error: "retry failed" });
+    session.create.mockResolvedValueOnce({ data: { id: "failed-session" } });
+    session.prompt.mockResolvedValueOnce({ error: "single failed" });
 
     await expect(
       runCouncillor(createContext(session) as never, councilConfig(), vi.fn(), {
@@ -249,12 +214,11 @@ describe("runCouncillor", () => {
         reviewerPermission: [],
         reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       }),
-    ).rejects.toThrow(
-      'first attempt failed: prompt failed: "first failed"; retry failed: prompt failed: "retry failed"',
-    );
+    ).rejects.toThrow("prompt failed: single failed");
+    expect(session.create).toHaveBeenCalledTimes(1);
   });
 
-  it("does not retry when the review hard cap has timed out", async () => {
+  it("propagates the hard-cap short-circuit from createChildSession", async () => {
     const session = createSessionMocks();
     session.create.mockResolvedValueOnce({ data: { id: "first-session" } });
     session.prompt.mockResolvedValueOnce({ error: "first failed" });

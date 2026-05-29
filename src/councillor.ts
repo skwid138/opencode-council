@@ -19,7 +19,6 @@ export async function runCouncillorAttempt(
     prompt: string;
     model: ModelConfig;
     timeoutMs: number;
-    attempt: number;
     directory: string;
     reviewerPermission: PermissionRuleset;
     reviewState: ReviewState;
@@ -28,9 +27,8 @@ export async function runCouncillorAttempt(
   const label = modelLabel(input.model);
   const startedAt = Date.now();
   let sessionID: string | undefined;
-  log("debug", "councillor attempt started", {
+  log("debug", "councillor request started", {
     model: label,
-    attempt: input.attempt,
     timeout_ms: input.timeoutMs,
   });
 
@@ -41,7 +39,7 @@ export async function runCouncillorAttempt(
           sessionID = await createChildSession(
             ctx,
             input.parentSessionID,
-            `council: ${label} attempt ${input.attempt}`,
+            `council: ${label}`,
             input.directory,
             [...input.reviewerPermission],
             input.reviewState,
@@ -67,11 +65,10 @@ export async function runCouncillorAttempt(
         }
       })(),
       input.timeoutMs,
-      `${label} attempt ${input.attempt}`,
+      label,
       () => {
-        log("debug", "councillor attempt timed out", {
+        log("debug", "councillor request timed out", {
           model: label,
-          attempt: input.attempt,
           timeout_ms: input.timeoutMs,
         });
         if (sessionID) {
@@ -82,17 +79,15 @@ export async function runCouncillorAttempt(
       },
     );
 
-    log("debug", "councillor attempt ended", {
+    log("debug", "councillor request completed", {
       model: label,
-      attempt: input.attempt,
       success: true,
       duration_ms: Date.now() - startedAt,
     });
     return response;
   } catch (error) {
-    log("debug", "councillor attempt ended", {
+    log("debug", "councillor request completed", {
       model: label,
-      attempt: input.attempt,
       success: false,
       duration_ms: Date.now() - startedAt,
       error: errorMessage(error),
@@ -114,33 +109,9 @@ export async function runCouncillor(
     reviewState: ReviewState;
   },
 ): Promise<CouncillorSuccess> {
-  try {
-    const response = await runCouncillorAttempt(ctx, councilConfig, log, {
-      ...input,
-      timeoutMs: councilConfig.timeouts.councillor_ms,
-      attempt: 1,
-    });
-    return { model: input.model, response, attempts: 1 };
-  } catch (firstError) {
-    if (input.reviewState.hardCapTimedOut || input.reviewState.quorumReached) {
-      throw firstError;
-    }
-
-    log("debug", "councillor retry triggered", {
-      model: modelLabel(input.model),
-      error: errorMessage(firstError),
-    });
-    try {
-      const response = await runCouncillorAttempt(ctx, councilConfig, log, {
-        ...input,
-        timeoutMs: councilConfig.timeouts.councillor_retry_ms,
-        attempt: 2,
-      });
-      return { model: input.model, response, attempts: 2 };
-    } catch (retryError) {
-      throw new Error(
-        `first attempt failed: ${errorMessage(firstError)}; retry failed: ${errorMessage(retryError)}`,
-      );
-    }
-  }
+  const response = await runCouncillorAttempt(ctx, councilConfig, log, {
+    ...input,
+    timeoutMs: councilConfig.timeouts.councillor_ms,
+  });
+  return { model: input.model, response, attempts: 1 /* #19 selective retry follow-up */ };
 }

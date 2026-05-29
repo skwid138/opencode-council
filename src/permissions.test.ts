@@ -27,7 +27,6 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 180_000,
-      councillor_retry_ms: 90_000,
       aggregator_ms: 120_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 420_000,

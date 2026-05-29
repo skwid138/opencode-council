@@ -9,10 +9,9 @@ import {
   type WarningLogger,
 } from "./types";
 
-export const COUNCILLOR_TIMEOUT_MS = 180_000;
-export const COUNCILLOR_RETRY_TIMEOUT_MS = 90_000;
+export const COUNCILLOR_TIMEOUT_MS = 270_000;
 export const AGGREGATOR_TIMEOUT_MS = 120_000;
-export const DEFAULT_HARD_CAP_MS = COUNCILLOR_TIMEOUT_MS + COUNCILLOR_RETRY_TIMEOUT_MS + AGGREGATOR_TIMEOUT_MS + 30_000;
+export const DEFAULT_HARD_CAP_MS = COUNCILLOR_TIMEOUT_MS + AGGREGATOR_TIMEOUT_MS + 30_000;
 export const REVIEWER_TEMPERATURE_IGNORED_WARNING =
   "reviewer_temperature is configured but will be ignored because a custom reviewer agent is specified — temperature only applies to the bundled reviewer";
 
@@ -97,6 +96,13 @@ export function parseCouncilConfig(
   warn: WarningLogger = () => {},
 ): Omit<CouncilConfig, "debug"> {
   const source = councilOptions(raw);
+  const timeoutSource = isPlainObject(source.timeouts) ? source.timeouts : {};
+
+  if (Object.prototype.hasOwnProperty.call(timeoutSource, "councillor_retry_ms")) {
+    warn(
+      "councillor_retry_ms is deprecated; fold the value into councillor_ms. Increase councillor_ms to preserve your prior total councillor budget.",
+    );
+  }
 
   if (!Array.isArray(source.models)) {
     throw new Error("council.models is required");
@@ -111,16 +117,10 @@ export function parseCouncilConfig(
     ? source.aggregator_model
     : null;
 
-  const timeoutSource = isPlainObject(source.timeouts) ? source.timeouts : {};
   const councillorMs = readTimeoutMs(
     timeoutSource,
     "councillor_ms",
     COUNCILLOR_TIMEOUT_MS,
-  );
-  const councillorRetryMs = readTimeoutMs(
-    timeoutSource,
-    "councillor_retry_ms",
-    COUNCILLOR_RETRY_TIMEOUT_MS,
   );
   const aggregatorMs = readTimeoutMs(
     timeoutSource,
@@ -129,7 +129,7 @@ export function parseCouncilConfig(
   );
   const quorumGraceMs = readNonNegativeMs(timeoutSource, "quorum_grace_ms", 0);
   const computedHardCapMs =
-    councillorMs + councillorRetryMs + aggregatorMs + quorumGraceMs + 30_000;
+    councillorMs + aggregatorMs + quorumGraceMs + 30_000;
   const hasExplicitHardCap =
     typeof timeoutSource.hard_cap_ms === "number" &&
     Number.isFinite(timeoutSource.hard_cap_ms);
@@ -144,7 +144,6 @@ export function parseCouncilConfig(
       configured_hard_cap_ms: hardCapMs,
       computed_hard_cap_ms: computedHardCapMs,
       councillor_ms: councillorMs,
-      councillor_retry_ms: councillorRetryMs,
       aggregator_ms: aggregatorMs,
       quorum_grace_ms: quorumGraceMs,
     });
@@ -174,7 +173,6 @@ export function parseCouncilConfig(
     aggregator_permission: readPermissionOverride(source.aggregator_permission, warn),
     timeouts: {
       councillor_ms: councillorMs,
-      councillor_retry_ms: councillorRetryMs,
       aggregator_ms: aggregatorMs,
       quorum_grace_ms: quorumGraceMs,
       hard_cap_ms: hardCapMs,

@@ -120,7 +120,7 @@ async function runCouncilReviewInner(
     return `Error: council_review received fewer than 2 successful councillor responses (${successes.length}/${councilConfig.models.length}). caller should fall back to a single reviewer.
 
 Successful councillors:
-${successes.length === 0 ? "none" : successes.map((success) => `- ${modelLabel(success.model)} (${success.attempts} attempt${success.attempts === 1 ? "" : "s"})`).join("\n")}
+${successes.length === 0 ? "none" : successes.map((success) => `- ${modelLabel(success.model)}`).join("\n")}
 
 Failed councillors:
 ${formatFailureSummary(failures)}${aborted.length > 0 ? `

@@ -44,8 +44,6 @@ export function buildAggregatorPrompt(input: {
     .map(
       (success, index) => `## Reviewer ${index + 1}: ${modelLabel(success.model)}
 
-Attempts: ${success.attempts}
-
 ${success.response}`,
     )
     .join("\n\n---\n\n");
@@ -88,7 +86,7 @@ ${input.originalPrompt}
 # Participation summary supplied by council_review
 
 Responded:
-${input.successes.map((success) => `- ${modelLabel(success.model)} (${success.attempts} attempt${success.attempts === 1 ? "" : "s"})`).join("\n")}
+${input.successes.map((success) => `- ${modelLabel(success.model)}`).join("\n")}
 
 Failed or timed out:
 ${failures}${abortedParticipation}

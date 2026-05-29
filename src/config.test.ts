@@ -236,8 +236,7 @@ describe("parseCouncilConfig", () => {
     expect(
       parseCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } }).timeouts,
     ).toEqual({
-      councillor_ms: 180_000,
-      councillor_retry_ms: 90_000,
+      councillor_ms: 270_000,
       aggregator_ms: AGGREGATOR_TIMEOUT_MS,
       quorum_grace_ms: 0,
       hard_cap_ms: DEFAULT_HARD_CAP_MS,
@@ -248,12 +247,44 @@ describe("parseCouncilConfig", () => {
         council: validCouncil({
           timeouts: {
             councillor_ms: 2_000,
-            councillor_retry_ms: 3_000,
             aggregator_ms: 4_000,
           },
         }),
       }).timeouts.hard_cap_ms,
-    ).toBe(39_000);
+    ).toBe(36_000);
+  });
+
+  it("warns once for deprecated retry timeout in wrapped options", () => {
+    const warn = vi.fn();
+
+    parseCouncilConfig(
+      { council: validCouncil({ timeouts: { councillor_retry_ms: 3_000 } }) },
+      warn,
+    );
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("councillor_retry_ms is deprecated; fold the value into councillor_ms"),
+    );
+  });
+
+  it("warns once for deprecated retry timeout in direct options", () => {
+    const warn = vi.fn();
+
+    parseCouncilConfig(validCouncil({ timeouts: { councillor_retry_ms: 3_000 } }), warn);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("councillor_retry_ms is deprecated; fold the value into councillor_ms"),
+    );
+  });
+
+  it("does not warn for retry deprecation when the old timeout key is absent", () => {
+    const warn = vi.fn();
+
+    parseCouncilConfig({ council: validCouncil({ timeouts: { councillor_ms: 3_000 } }) }, warn);
+
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it.each([2, 3, 5, 8])("defaults quorum to the model count for N=%i", (count) => {
@@ -314,13 +345,12 @@ describe("parseCouncilConfig", () => {
         council: validCouncil({
           timeouts: {
             councillor_ms: 2_000,
-            councillor_retry_ms: 3_000,
             aggregator_ms: 4_000,
             quorum_grace_ms: 5_000,
           },
         }),
       }).timeouts.hard_cap_ms,
-    ).toBe(44_000);
+    ).toBe(41_000);
   });
 
   it("honors explicit hard caps and warns when below the computed budget", () => {
