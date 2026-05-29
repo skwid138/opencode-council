@@ -34,6 +34,15 @@ function assistantMessages(text: string, created = 1) {
   ];
 }
 
+class StructuredError extends Error {
+  code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 describe("extractLatestAssistantText", () => {
   it("extracts the newest assistant text parts", () => {
     expect(
@@ -167,6 +176,24 @@ describe("createChildSession", () => {
     ).rejects.toThrow("failed to create child session: missing session id");
   });
 
+  it("renders structured create errors with enumerable metadata", async () => {
+    const session = createSessionMocks();
+    session.create.mockResolvedValueOnce({ error: new StructuredError("create boom", "E_CREATE") });
+
+    await expect(
+      createChildSession(createContext(session) as never, "parent", "title", "/dir"),
+    ).rejects.toThrow('failed to create child session: create boom {"code":"E_CREATE"} (json)');
+  });
+
+  it("renders plain object create errors as JSON", async () => {
+    const session = createSessionMocks();
+    session.create.mockResolvedValueOnce({ error: { code: "E_CREATE" } });
+
+    await expect(
+      createChildSession(createContext(session) as never, "parent", "title", "/dir"),
+    ).rejects.toThrow('failed to create child session: {"code":"E_CREATE"}');
+  });
+
   it("swallows abort failures during post-create hard-cap cleanup", async () => {
     const session = createSessionMocks();
     const reviewState: ReviewState = {
@@ -254,7 +281,7 @@ describe("promptAndExtract", () => {
         agent: "agent",
         prompt: "review this",
       }),
-    ).rejects.toThrow('prompt failed: "bad prompt"');
+    ).rejects.toThrow("prompt failed: bad prompt");
 
     const messagesFailure = createSessionMocks();
     messagesFailure.prompt.mockResolvedValueOnce({});
@@ -277,5 +304,59 @@ describe("promptAndExtract", () => {
         prompt: "review this",
       }),
     ).rejects.toThrow("empty response");
+  });
+
+  it("renders structured prompt errors with enumerable metadata", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({ error: new StructuredError("prompt boom", "E_PROMPT") });
+
+    await expect(
+      promptAndExtract(createContext(session) as never, {
+        sessionID: "child",
+        agent: "agent",
+        prompt: "review this",
+      }),
+    ).rejects.toThrow('prompt failed: prompt boom {"code":"E_PROMPT"} (json)');
+  });
+
+  it("renders plain object prompt errors as JSON", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({ error: { code: "E_PROMPT" } });
+
+    await expect(
+      promptAndExtract(createContext(session) as never, {
+        sessionID: "child",
+        agent: "agent",
+        prompt: "review this",
+      }),
+    ).rejects.toThrow('prompt failed: {"code":"E_PROMPT"}');
+  });
+
+  it("renders structured message errors with enumerable metadata", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ error: new StructuredError("messages boom", "E_MESSAGES") });
+
+    await expect(
+      promptAndExtract(createContext(session) as never, {
+        sessionID: "child",
+        agent: "agent",
+        prompt: "review this",
+      }),
+    ).rejects.toThrow('failed to get messages: messages boom {"code":"E_MESSAGES"} (json)');
+  });
+
+  it("renders plain object message errors as JSON", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ error: { code: "E_MESSAGES" } });
+
+    await expect(
+      promptAndExtract(createContext(session) as never, {
+        sessionID: "child",
+        agent: "agent",
+        prompt: "review this",
+      }),
+    ).rejects.toThrow('failed to get messages: {"code":"E_MESSAGES"}');
   });
 });

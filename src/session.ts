@@ -1,3 +1,4 @@
+import { errorMessage } from "./logging";
 import type {
   CouncilPluginContext,
   ModelConfig,
@@ -80,7 +81,7 @@ export async function createChildSession(
   };
 
   if (createResult.error) {
-    throw new Error(`failed to create child session: ${createResult.error}`);
+    throw new Error(`failed to create child session: ${errorMessage(createResult.error)}`);
   }
 
   const sessionID = createResult.data?.id;
@@ -132,7 +133,7 @@ export async function promptAndExtract(
   } as Parameters<typeof ctx.client.session.prompt>[0]) as { error?: unknown };
 
   if (promptResult.error) {
-    throw new Error(`prompt failed: ${JSON.stringify(promptResult.error)}`);
+    throw new Error(`prompt failed: ${errorMessage(promptResult.error)}`);
   }
 
   const messagesResult = await ctx.client.session.messages({
@@ -140,7 +141,7 @@ export async function promptAndExtract(
   }) as { data?: unknown; error?: unknown };
 
   if (messagesResult.error) {
-    throw new Error(`failed to get messages: ${messagesResult.error}`);
+    throw new Error(`failed to get messages: ${errorMessage(messagesResult.error)}`);
   }
 
   const responseText = extractLatestAssistantText(messagesResult.data);
