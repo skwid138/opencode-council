@@ -72,8 +72,10 @@ Full config with all options:
         "council": {
           "models": [
             { "providerID": "openai", "modelID": "gpt-5.5" },
-            { "providerID": "github-copilot", "modelID": "claude-opus-4.6" }
+            { "providerID": "github-copilot", "modelID": "claude-opus-4.6" },
+            { "providerID": "google", "modelID": "gemini-3-pro" }
           ],
+          "quorum": 2,
           "reviewer": "my-reviewer",
           "aggregator": "my-aggregator",
           "debug": false,
@@ -95,7 +97,8 @@ Full config with all options:
             "councillor_ms": 180000,
             "councillor_retry_ms": 90000,
             "aggregator_ms": 120000,
-            "hard_cap_ms": 420000
+            "quorum_grace_ms": 10000,
+            "hard_cap_ms": 430000
           }
         }
       }
@@ -123,10 +126,12 @@ Note: `reviewer_temperature` is shown for option reference; it only affects the 
 | `council.reviewer_permission` | Catch-all `bash`/`external_directory` allows plus workspace inherited rules | Extra session-level reviewer rules. Values may be flat (`"bash": "deny"`) or nested pattern maps (`"bash": { "sudo *": "deny" }`). Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_permission` | none | Optional session-level aggregator rules. No workspace inheritance or catch-all allows are applied to the aggregator. Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_model` | First available model | Specific model for the aggregator agent |
+| `council.quorum` | `models.length` | Number of successful councillor responses required before the aggregator can run. When `quorum < models.length`, the aggregator starts as soon as quorum is reached and pending councillors are aborted (after an optional grace window). Must be an integer in `[2, models.length]`. Default preserves wait-for-all behavior. |
 | `council.timeouts.councillor_ms` | `180000` (3 min) | Timeout for each reviewer's first attempt |
 | `council.timeouts.councillor_retry_ms` | `90000` (90s) | Timeout for automatic retry on first failure |
 | `council.timeouts.aggregator_ms` | `120000` (2 min) | Timeout for the aggregation step. This starts after the councillor phase completes, so the aggregator gets a fresh clock. |
-| `council.timeouts.hard_cap_ms` | computed (`420000` with defaults) | Absolute maximum wall time for the entire operation. By default this is `councillor_ms + councillor_retry_ms + aggregator_ms + 30000`. |
+| `council.timeouts.quorum_grace_ms` | `0` | Optional grace window in milliseconds after quorum is reached, during which stragglers can still join before the laggard abort sweep. Set to `0` (default) to abort pending councillors immediately on quorum. |
+| `council.timeouts.hard_cap_ms` | computed (`420000` with defaults) | Absolute maximum wall time for the entire operation. By default this is `councillor_ms + councillor_retry_ms + aggregator_ms + quorum_grace_ms + 30000`. |
 
 ### Timeout behavior
 
@@ -135,8 +140,9 @@ Council review uses three timeout layers:
 1. Each councillor attempt gets `councillor_ms`.
 2. A failed or timed-out councillor gets one retry with `councillor_retry_ms`.
 3. The aggregator gets a fresh `aggregator_ms` clock after the councillor phase completes.
+4. When `quorum < models.length`, a fourth optional layer kicks in: once `quorum` councillors succeed, the orchestrator waits up to `quorum_grace_ms` for stragglers to join, then aborts any still-pending councillor sessions before invoking the aggregator. Aborted laggards do not retry.
 
-The outer `hard_cap_ms` is a safety net around the whole operation. When omitted, it is computed from the resolved phase timeouts plus a 30-second buffer. With defaults, that is `180000 + 90000 + 120000 + 30000 = 420000` (7 minutes).
+The outer `hard_cap_ms` is a safety net around the whole operation. When omitted, it is computed from the resolved phase timeouts plus a 30-second buffer: `councillor_ms + councillor_retry_ms + aggregator_ms + quorum_grace_ms + 30000`. With defaults (grace = 0), that is `180000 + 90000 + 120000 + 0 + 30000 = 420000` (7 minutes).
 
 If you explicitly set `hard_cap_ms`, the plugin honors it exactly. If the explicit hard cap is smaller than the computed phase budget, the plugin emits a structured warning but does not shrink the inner phase timeouts.
 
@@ -202,9 +208,10 @@ For working examples of reviewer and aggregator agent definitions, see:
 
 1. **Fan out** — The review prompt is sent to each configured model in parallel, each running as the specified `reviewer` agent in its own child session.
 2. **Retry** — If a reviewer fails or times out, it gets one automatic retry with a shorter timeout.
-3. **Gate** — At least 2 successful responses are required. Otherwise, an error is returned for fallback handling.
-4. **Aggregate** — Successful responses are passed to the `aggregator` agent, which performs structural synthesis without issuing its own verdict.
-5. **Return** — The aggregated result is returned to the calling agent.
+3. **Quorum** — As soon as `quorum` reviewers respond successfully (default: all of them), the orchestrator stops waiting on the rest. If `quorum_grace_ms > 0`, a grace window lets stragglers join before pending sessions are aborted. Aborted laggards do not retry.
+4. **Gate** — At least 2 successful responses are required overall. Otherwise, an error is returned for fallback handling.
+5. **Aggregate** — Successful responses are passed to the `aggregator` agent, which performs structural synthesis without issuing its own verdict. The aggregator prompt is byte-identical to the pre-quorum behavior when no councillors were aborted.
+6. **Return** — The aggregated result is returned to the calling agent.
 
 ## Source structure
 
@@ -232,7 +239,7 @@ The plugin registers a single tool:
 |-----------|------|-------------|
 | `prompt` | `string` | The complete review prompt to send to each reviewer |
 
-**Returns:** The aggregator's structural synthesis, or an error string if fewer than 2 reviewers responded.
+**Returns:** The aggregator's structural synthesis, or an error string if fewer than 2 reviewers succeeded (timeouts, failures, or quorum-aborts all count against the success threshold).
 
 ## Example output
 

@@ -41,7 +41,7 @@ The individual timeout governing one phase of the council operation (councillor 
 _Avoid_: step timeout, inner timeout
 
 **Computed hard cap**:
-The default hard cap derived from `councillor + retry + aggregator + 30s buffer` when no explicit `hard_cap_ms` is configured.
+The default hard cap derived from `councillor + retry + aggregator + quorum_grace + 30s buffer` when no explicit `hard_cap_ms` is configured.
 _Avoid_: auto timeout, dynamic cap
 
 **#28037 workaround (catch-all allows)**:
@@ -57,7 +57,23 @@ Child-session permission rulesets are constructed in append order. OpenCode eval
 Workspace permission config captured from the config hook at plugin startup. The config hook is guaranteed to run before any tool execution, so this value is always populated when `buildReviewerRuleset` is called. OpenCode does not hot-reload config; the value remains valid for the plugin's lifetime.
 
 **Active session tracking**:
-A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by hard-cap timeout to abort all in-flight sessions. Abort calls are fire-and-forget and idempotent — double-aborts are tolerated.
+A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by the hard-cap timeout to abort all in-flight sessions, and by the quorum-abort sweep to terminate still-pending councillors once `quorum` successes have been reached. Abort calls are fire-and-forget and idempotent — double-aborts are tolerated.
+
+**Quorum**:
+The number of successful councillor responses required before the aggregator can run. Configured via `council.quorum`; valid range is `[2, models.length]`. Default is `models.length` (wait-for-all). When `quorum < models.length`, the orchestrator stops waiting on stragglers once quorum is reached.
+_Avoid_: threshold, minimum, majority
+
+**Quorum grace window**:
+An optional wall-clock window after quorum is reached during which still-pending councillors may still complete and have their responses counted. Configured via `council.timeouts.quorum_grace_ms`; defaults to `0` (abort laggards immediately on quorum). Cancellable — if all councillors finish during the window, the timer is cleared.
+_Avoid_: straggler window, late-arrival window
+
+**Laggard abort sweep**:
+The orchestrator-level operation that runs after quorum is reached (and after the optional grace window expires) to abort any councillor sessions still in `pending` state. Implemented as a non-blocking iteration over `reviewState.activeSessions` issuing fire-and-forget aborts. Pending councillor states are finalized to `aborted` BEFORE the sweep iterates, so any late-resolving `createChildSession` call sees `reviewState.quorumReached === true` and self-aborts.
+_Avoid_: cleanup, cancellation
+
+**Aborted councillor**:
+A councillor whose session was terminated by the laggard abort sweep because quorum was reached without it. Tracked separately from failures and timeouts as `CouncillorAborted = { model }`. Rendered in the aggregator prompt under a conditional `"## Aborted (quorum reached)"` section; the section is omitted entirely when no councillors were aborted, preserving byte-identical aggregator prompt behavior in the default (`quorum === models.length`) configuration.
+_Avoid_: cancelled councillor, timed-out councillor, failed councillor
 
 ## Relationships
 
@@ -66,6 +82,7 @@ A `Set<string>` of child session IDs maintained during a council review. Session
 - The **aggregator agent** receives all councillor responses and produces deduplicated findings.
 - **Permission overrides** layer on top of the active agent's permissions (bundled or user-specified) as the highest-priority rules.
 - The **hard cap** wraps the entire operation as a safety net; **phase timeouts** govern individual phases independently with fresh clocks.
+- When **quorum** is reached before all councillors respond, the orchestrator optionally waits up to the **quorum grace window**, then runs the **laggard abort sweep** to terminate still-pending councillor sessions. Each terminated session becomes an **aborted councillor** in the aggregator's participation summary.
 
 ## Example dialogue
 
@@ -74,6 +91,9 @@ A `Set<string>` of child session IDs maintained during a council review. Session
 
 > **Dev:** "Can I use `reviewer_permission` to add permissions to my custom saruman agent?"
 > **Domain expert:** "Yes — `reviewer_permission` layers on top of saruman's own permissions as highest-priority rules. This lets you tighten or loosen permissions for the council context without editing the agent definition."
+
+> **Dev:** "If I set `quorum: 3` with 5 models, will the aggregator always get exactly 3 responses?"
+> **Domain expert:** "Not necessarily. It gets at least 3 (the quorum threshold). If `quorum_grace_ms > 0`, stragglers that complete during the grace window are also included. The default is `quorum = models.length` which preserves wait-for-all behavior — early aggregation is opt-in."
 
 ## Flagged ambiguities
 
