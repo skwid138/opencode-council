@@ -63,6 +63,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator: "aggregator",
     debug: false,
     models: [MODEL_A, MODEL_B],
+    quorum: 2,
     aggregator_model: null,
     reviewer_temperature: null,
     reviewer_permission: null,
@@ -71,6 +72,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
       councillor_ms: 120_000,
       councillor_retry_ms: 90_000,
       aggregator_ms: 120_000,
+      quorum_grace_ms: 0,
       hard_cap_ms: 360_000,
     },
     ...overrides,
@@ -83,7 +85,11 @@ describe("runCouncillorAttempt", () => {
     session.create.mockResolvedValueOnce({ data: { id: "attempt-session" } });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
-    const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: false };
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: false,
+      quorumReached: false,
+    };
 
     await expect(
       runCouncillorAttempt(createContext(session) as never, councilConfig(), vi.fn(), {
@@ -133,7 +139,7 @@ describe("runCouncillorAttempt", () => {
         attempt: 1,
         directory: "/dir",
         reviewerPermission: [],
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       }),
     ).rejects.toThrow("provider-a/model-a attempt 1 timed out");
 
@@ -166,7 +172,7 @@ describe("runCouncillorAttempt", () => {
         attempt: 1,
         directory: "/dir",
         reviewerPermission: [],
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       },
     );
 
@@ -194,7 +200,7 @@ describe("runCouncillor", () => {
         model: MODEL_A,
         directory: "/dir",
         reviewerPermission: [],
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       }),
     ).resolves.toEqual({ model: MODEL_A, response: "response", attempts: 1 });
   });
@@ -215,7 +221,7 @@ describe("runCouncillor", () => {
         model: MODEL_A,
         directory: "/dir",
         reviewerPermission: [],
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       }),
     ).resolves.toEqual({ model: MODEL_A, response: "retry response", attempts: 2 });
 
@@ -241,7 +247,7 @@ describe("runCouncillor", () => {
         model: MODEL_A,
         directory: "/dir",
         reviewerPermission: [],
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       }),
     ).rejects.toThrow(
       'first attempt failed: prompt failed: "first failed"; retry failed: prompt failed: "retry failed"',
@@ -252,7 +258,11 @@ describe("runCouncillor", () => {
     const session = createSessionMocks();
     session.create.mockResolvedValueOnce({ data: { id: "first-session" } });
     session.prompt.mockResolvedValueOnce({ error: "first failed" });
-    const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: true };
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: true,
+      quorumReached: false,
+    };
 
     await expect(
       runCouncillor(createContext(session) as never, councilConfig(), vi.fn(), {

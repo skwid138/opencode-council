@@ -17,6 +17,13 @@ import {
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
 
+function models(count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    providerID: `provider-${index}`,
+    modelID: `model-${index}`,
+  }));
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
@@ -232,6 +239,7 @@ describe("parseCouncilConfig", () => {
       councillor_ms: 180_000,
       councillor_retry_ms: 90_000,
       aggregator_ms: AGGREGATOR_TIMEOUT_MS,
+      quorum_grace_ms: 0,
       hard_cap_ms: DEFAULT_HARD_CAP_MS,
     });
 
@@ -248,6 +256,73 @@ describe("parseCouncilConfig", () => {
     ).toBe(39_000);
   });
 
+  it.each([2, 3, 5, 8])("defaults quorum to the model count for N=%i", (count) => {
+    const config = parseCouncilConfig({ council: validCouncil({ models: models(count) }) });
+
+    expect(config.quorum).toBe(count);
+  });
+
+  it("accepts explicit quorum values between 2 and the model count", () => {
+    expect(
+      parseCouncilConfig({ council: validCouncil({ models: models(5), quorum: 2 }) }).quorum,
+    ).toBe(2);
+    expect(
+      parseCouncilConfig({ council: validCouncil({ models: models(5), quorum: 5 }) }).quorum,
+    ).toBe(5);
+  });
+
+  it.each([1, 4, 2.5, "3", -1])(
+    "warns and falls back to the model count for invalid quorum %s",
+    (quorum) => {
+      const warn = vi.fn();
+
+      const config = parseCouncilConfig(
+        { council: validCouncil({ models: models(3), quorum }) },
+        warn,
+      );
+
+      expect(config.quorum).toBe(3);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Invalid council.quorum"),
+      );
+    },
+  );
+
+  it("defaults quorum_grace_ms to 0", () => {
+    expect(parseCouncilConfig({ council: validCouncil() }).timeouts.quorum_grace_ms).toBe(0);
+  });
+
+  it("preserves explicit positive quorum_grace_ms values", () => {
+    expect(
+      parseCouncilConfig({
+        council: validCouncil({ timeouts: { quorum_grace_ms: 12_345 } }),
+      }).timeouts.quorum_grace_ms,
+    ).toBe(12_345);
+  });
+
+  it("coerces negative quorum_grace_ms values to 0", () => {
+    expect(
+      parseCouncilConfig({
+        council: validCouncil({ timeouts: { quorum_grace_ms: -50 } }),
+      }).timeouts.quorum_grace_ms,
+    ).toBe(0);
+  });
+
+  it("includes quorum_grace_ms in the computed hard cap", () => {
+    expect(
+      parseCouncilConfig({
+        council: validCouncil({
+          timeouts: {
+            councillor_ms: 2_000,
+            councillor_retry_ms: 3_000,
+            aggregator_ms: 4_000,
+            quorum_grace_ms: 5_000,
+          },
+        }),
+      }).timeouts.hard_cap_ms,
+    ).toBe(44_000);
+  });
+
   it("honors explicit hard caps and warns when below the computed budget", () => {
     const warn = vi.fn();
 
@@ -260,6 +335,20 @@ describe("parseCouncilConfig", () => {
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("Configured hard_cap_ms is below computed phase timeout budget"),
       expect.objectContaining({ configured_hard_cap_ms: 2_000, computed_hard_cap_ms: 420_000 }),
+    );
+  });
+
+  it("includes quorum_grace_ms in under-cap warning payloads", () => {
+    const warn = vi.fn();
+
+    parseCouncilConfig(
+      { council: validCouncil({ timeouts: { quorum_grace_ms: 5_000, hard_cap_ms: 2_000 } }) },
+      warn,
+    );
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Configured hard_cap_ms is below computed phase timeout budget"),
+      expect.objectContaining({ quorum_grace_ms: 5_000, computed_hard_cap_ms: 425_000 }),
     );
   });
 

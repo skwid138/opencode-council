@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AGGREGATOR_TOOLS,
   buildAggregatorPrompt,
+  formatAbortedSummary,
   formatFailureSummary,
   synthesizeWithAggregator,
 } from "./aggregator";
@@ -68,6 +69,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator: "aggregator",
     debug: false,
     models: [MODEL_A, MODEL_B],
+    quorum: 2,
     aggregator_model: null,
     reviewer_temperature: null,
     reviewer_permission: null,
@@ -76,6 +78,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
       councillor_ms: 180_000,
       councillor_retry_ms: 90_000,
       aggregator_ms: 120_000,
+      quorum_grace_ms: 0,
       hard_cap_ms: 420_000,
     },
     ...overrides,
@@ -91,6 +94,7 @@ describe("buildAggregatorPrompt", () => {
         { model: MODEL_B, response: "response b", attempts: 2 },
       ],
       failures: [{ model: { providerID: "provider-c", modelID: "model-c" }, error: "failed" }],
+      aborted: [],
     });
 
     expect(prompt).toContain("# Original review prompt\n\nreview this");
@@ -107,8 +111,16 @@ describe("buildAggregatorPrompt", () => {
         originalPrompt: "review this",
         successes: [{ model: MODEL_A, response: "response a", attempts: 1 }],
         failures: [],
+        aborted: [],
       }),
     ).toContain("Failed or timed out:\n- none");
+  });
+});
+
+describe("formatAbortedSummary", () => {
+  it("formats aborted councillors or none", () => {
+    expect(formatAbortedSummary([])).toBe("none");
+    expect(formatAbortedSummary([{ model: MODEL_A }])).toBe("- provider-a/model-a");
   });
 });
 
@@ -127,7 +139,11 @@ describe("synthesizeWithAggregator", () => {
     session.create.mockResolvedValueOnce({ data: { id: "aggregator-session" } });
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
-    const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: false };
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: false,
+      quorumReached: false,
+    };
 
     await expect(
       synthesizeWithAggregator(createContext(session) as never, councilConfig(), vi.fn(), {
@@ -138,6 +154,7 @@ describe("synthesizeWithAggregator", () => {
           { model: MODEL_B, response: "response b", attempts: 1 },
         ],
         failures: [],
+        aborted: [],
         directory: "/dir",
         reviewState,
         aggregatorPermission: [{ permission: "bash", pattern: "*", action: "deny" }],
@@ -184,8 +201,9 @@ describe("synthesizeWithAggregator", () => {
           { model: MODEL_B, response: "response b", attempts: 1 },
         ],
         failures: [],
+        aborted: [],
         directory: "/dir",
-        reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+        reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
       },
     );
 
@@ -217,8 +235,9 @@ describe("synthesizeWithAggregator", () => {
             { model: MODEL_B, response: "response b", attempts: 1 },
           ],
           failures: [],
+          aborted: [],
           directory: "/dir",
-          reviewState: { activeSessions: new Set(), hardCapTimedOut: false },
+          reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
         },
       ),
     ).rejects.toThrow("aggregator synthesis timed out");

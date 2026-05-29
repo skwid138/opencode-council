@@ -82,7 +82,11 @@ describe("createChildSession", () => {
   it("creates a child session with title, directory, and optional permissions", async () => {
     const session = createSessionMocks();
     session.create.mockResolvedValueOnce({ data: { id: "child" } });
-    const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: false };
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: false,
+      quorumReached: false,
+    };
 
     await expect(
       createChildSession(
@@ -116,7 +120,7 @@ describe("createChildSession", () => {
         "title",
         "/dir",
         undefined,
-        { activeSessions: new Set(), hardCapTimedOut: true },
+        { activeSessions: new Set(), hardCapTimedOut: true, quorumReached: false },
       ),
     ).rejects.toThrow("council_review hard cap already triggered");
     expect(session.create).not.toHaveBeenCalled();
@@ -124,7 +128,11 @@ describe("createChildSession", () => {
 
   it("aborts and removes a child when hard cap triggers after create", async () => {
     const session = createSessionMocks();
-    const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: false };
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: false,
+      quorumReached: false,
+    };
     session.create.mockImplementation(async () => {
       reviewState.hardCapTimedOut = true;
       return { data: { id: "late-child" } };
@@ -161,7 +169,11 @@ describe("createChildSession", () => {
 
   it("swallows abort failures during post-create hard-cap cleanup", async () => {
     const session = createSessionMocks();
-    const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: false };
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: false,
+      quorumReached: false,
+    };
     session.create.mockImplementation(async () => {
       reviewState.hardCapTimedOut = true;
       return { data: { id: "late-child" } };
@@ -178,6 +190,31 @@ describe("createChildSession", () => {
         reviewState,
       ),
     ).rejects.toThrow("council_review hard cap already triggered");
+  });
+
+  it("aborts and removes a reviewer child when quorum is reached after create", async () => {
+    const session = createSessionMocks();
+    const reviewState: ReviewState = {
+      activeSessions: new Set(),
+      hardCapTimedOut: false,
+      quorumReached: true,
+    };
+    session.create.mockResolvedValueOnce({ data: { id: "late-reviewer" } });
+
+    await expect(
+      createChildSession(
+        createContext(session) as never,
+        "parent",
+        "title",
+        "/dir",
+        undefined,
+        reviewState,
+        true,
+      ),
+    ).rejects.toThrow("Council quorum reached; aborting late reviewer session.");
+
+    expect(reviewState.activeSessions.has("late-reviewer")).toBe(false);
+    expect(session.abort).toHaveBeenCalledWith({ path: { id: "late-reviewer" } });
   });
 });
 

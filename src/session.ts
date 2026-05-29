@@ -59,6 +59,7 @@ export async function createChildSession(
   directory: string,
   permission?: PermissionRuleset,
   reviewState?: ReviewState,
+  abortIfQuorumReached: boolean = false,
 ): Promise<string> {
   if (reviewState?.hardCapTimedOut) {
     throw new Error("council_review hard cap already triggered");
@@ -94,6 +95,14 @@ export async function createChildSession(
       .abort({ path: { id: sessionID } })
       .catch(() => {});
     throw new Error("council_review hard cap already triggered");
+  }
+
+  if (abortIfQuorumReached && reviewState?.quorumReached) {
+    reviewState.activeSessions.delete(sessionID);
+    void ctx.client.session
+      .abort({ path: { id: sessionID } })
+      .catch(() => {});
+    throw new Error("Council quorum reached; aborting late reviewer session.");
   }
 
   return sessionID;

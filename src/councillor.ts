@@ -45,6 +45,7 @@ export async function runCouncillorAttempt(
             input.directory,
             [...input.reviewerPermission],
             input.reviewState,
+            true,
           );
 
           return await promptAndExtract(ctx, {
@@ -121,7 +122,9 @@ export async function runCouncillor(
     });
     return { model: input.model, response, attempts: 1 };
   } catch (firstError) {
-    if (input.reviewState.hardCapTimedOut) throw firstError;
+    if (input.reviewState.hardCapTimedOut || input.reviewState.quorumReached) {
+      throw firstError;
+    }
 
     log("debug", "councillor retry triggered", {
       model: modelLabel(input.model),

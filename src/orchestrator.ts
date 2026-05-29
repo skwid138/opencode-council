@@ -1,4 +1,4 @@
-import { formatFailureSummary, synthesizeWithAggregator } from "./aggregator";
+import { formatAbortedSummary, formatFailureSummary, synthesizeWithAggregator } from "./aggregator";
 import { runCouncillor } from "./councillor";
 import { errorMessage, type Logger, modelLabel } from "./logging";
 import {
@@ -11,6 +11,7 @@ import { raceWithTimeout } from "./timeout";
 import type {
   CouncilConfig,
   CouncilPluginContext,
+  CouncillorAborted,
   CouncillorFailure,
   CouncillorSuccess,
   ReviewState,
@@ -41,6 +42,17 @@ async function runCouncilReviewInner(
     permission_json: JSON.stringify(reviewerPermission),
   });
 
+  type CouncillorState = "pending" | "success" | "failure" | "aborted";
+  const states: CouncillorState[] = councilConfig.models.map(() => "pending");
+  const successes: CouncillorSuccess[] = [];
+  const failures: CouncillorFailure[] = [];
+  const aborted: CouncillorAborted[] = [];
+
+  let resolveQuorum: () => void = () => {};
+  const quorumPromise = new Promise<void>((resolve) => {
+    resolveQuorum = resolve;
+  });
+
   const councillorPromises = councilConfig.models.map((model) =>
     runCouncillor(ctx, councilConfig, log, {
       parentSessionID,
@@ -52,18 +64,57 @@ async function runCouncilReviewInner(
     }),
   );
 
-  const settledResults = await Promise.allSettled(councillorPromises);
-  const successes: CouncillorSuccess[] = [];
-  const failures: CouncillorFailure[] = [];
+  const tracked = councillorPromises.map((promise, index) =>
+    promise.then(
+      (value) => {
+        if (states[index] !== "pending") return;
+        states[index] = "success";
+        successes.push(value);
+        if (successes.length === councilConfig.quorum) resolveQuorum();
+      },
+      (error) => {
+        if (states[index] !== "pending") return;
+        states[index] = "failure";
+        failures.push({ model: councilConfig.models[index], error: errorMessage(error) });
+      },
+    ),
+  );
+  const allFinished = Promise.all(tracked);
 
-  settledResults.forEach((result, index) => {
-    const model = councilConfig.models[index];
-    if (result.status === "fulfilled") {
-      successes.push(result.value);
-    } else {
-      failures.push({ model, error: errorMessage(result.reason) });
+  await Promise.race([quorumPromise, allFinished]);
+
+  if (successes.length >= councilConfig.quorum && states.some((state) => state === "pending")) {
+    reviewState.quorumReached = true;
+
+    if (councilConfig.timeouts.quorum_grace_ms > 0) {
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          allFinished,
+          new Promise<void>((resolve) => {
+            graceTimer = setTimeout(resolve, councilConfig.timeouts.quorum_grace_ms);
+          }),
+        ]);
+      } finally {
+        if (graceTimer) clearTimeout(graceTimer);
+      }
     }
-  });
+
+    states.forEach((state, index) => {
+      if (state === "pending") {
+        states[index] = "aborted";
+        aborted.push({ model: councilConfig.models[index] });
+      }
+    });
+
+    for (const sessionID of reviewState.activeSessions) {
+      void ctx.client.session
+        .abort({ path: { id: sessionID } })
+        .catch(() => {});
+    }
+  } else {
+    await allFinished;
+  }
 
   if (successes.length < 2) {
     return `Error: council_review received fewer than 2 successful councillor responses (${successes.length}/${councilConfig.models.length}). caller should fall back to a single reviewer.
@@ -72,7 +123,10 @@ Successful councillors:
 ${successes.length === 0 ? "none" : successes.map((success) => `- ${modelLabel(success.model)} (${success.attempts} attempt${success.attempts === 1 ? "" : "s"})`).join("\n")}
 
 Failed councillors:
-${formatFailureSummary(failures)}`;
+${formatFailureSummary(failures)}${aborted.length > 0 ? `
+
+Aborted councillors:
+${formatAbortedSummary(aborted)}` : ""}`;
   }
 
   return await synthesizeWithAggregator(ctx, councilConfig, log, {
@@ -80,6 +134,7 @@ ${formatFailureSummary(failures)}`;
     originalPrompt: prompt,
     successes,
     failures,
+    aborted,
     directory,
     reviewState,
     aggregatorPermission: aggregatorSessionPermission(councilConfig),
@@ -99,6 +154,7 @@ export async function runCouncilReview(
   const reviewState: ReviewState = {
     activeSessions: new Set<string>(),
     hardCapTimedOut: false,
+    quorumReached: false,
   };
   return await raceWithTimeout(
     runCouncilReviewInner(

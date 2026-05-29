@@ -4,6 +4,7 @@ import { raceWithTimeout } from "./timeout";
 import type {
   CouncilConfig,
   CouncilPluginContext,
+  CouncillorAborted,
   CouncillorFailure,
   CouncillorSuccess,
   PermissionRuleset,
@@ -37,6 +38,7 @@ export function buildAggregatorPrompt(input: {
   originalPrompt: string;
   successes: CouncillorSuccess[];
   failures: CouncillorFailure[];
+  aborted: CouncillorAborted[];
 }): string {
   const successfulResponses = input.successes
     .map(
@@ -58,6 +60,23 @@ ${success.response}`,
           .join("\n")
       : "- none";
 
+  const abortedParticipation =
+    input.aborted.length > 0
+      ? `
+
+Aborted (quorum reached):
+${formatAbortedSummary(input.aborted)}`
+      : "";
+
+  const abortedSection =
+    input.aborted.length > 0
+      ? `
+
+## Aborted (quorum reached)
+
+${formatAbortedSummary(input.aborted)}`
+      : "";
+
   return `You are aggregating multiple reviewer responses to one review prompt.
 
 Do structural aggregation only. Do not issue your own verdict.
@@ -72,11 +91,11 @@ Responded:
 ${input.successes.map((success) => `- ${modelLabel(success.model)} (${success.attempts} attempt${success.attempts === 1 ? "" : "s"})`).join("\n")}
 
 Failed or timed out:
-${failures}
+${failures}${abortedParticipation}
 
 # Reviewer responses
 
-${successfulResponses}`;
+${successfulResponses}${abortedSection}`;
 }
 
 export function formatFailureSummary(failures: CouncillorFailure[]): string {
@@ -84,6 +103,11 @@ export function formatFailureSummary(failures: CouncillorFailure[]): string {
   return failures
     .map((failure) => `- ${modelLabel(failure.model)}: ${failure.error}`)
     .join("\n");
+}
+
+export function formatAbortedSummary(aborted: CouncillorAborted[]): string {
+  if (aborted.length === 0) return "none";
+  return aborted.map((entry) => `- ${modelLabel(entry.model)}`).join("\n");
 }
 
 export async function synthesizeWithAggregator(
@@ -95,6 +119,7 @@ export async function synthesizeWithAggregator(
     originalPrompt: string;
     successes: CouncillorSuccess[];
     failures: CouncillorFailure[];
+    aborted: CouncillorAborted[];
     directory: string;
     reviewState: ReviewState;
     aggregatorPermission?: PermissionRuleset;

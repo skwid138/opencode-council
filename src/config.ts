@@ -68,6 +68,21 @@ export function readTimeoutMs(
   return Math.max(1, Math.round(raw));
 }
 
+/**
+ * Reads a non-negative millisecond value from a config source.
+ * Floors at 0 (vs readTimeoutMs which floors at 1).
+ * Use for timeouts that legitimately accept 0 (e.g. quorum_grace_ms).
+ */
+function readNonNegativeMs(
+  source: Record<string, unknown>,
+  key: string,
+  fallback: number,
+): number {
+  const raw = source[key];
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+  return Math.max(0, Math.round(raw));
+}
+
 export function readReviewerTemperature(source: Record<string, unknown>): number | null {
   const raw = source.reviewer_temperature;
   if (raw === undefined || raw === null) return null;
@@ -112,7 +127,9 @@ export function parseCouncilConfig(
     "aggregator_ms",
     AGGREGATOR_TIMEOUT_MS,
   );
-  const computedHardCapMs = councillorMs + councillorRetryMs + aggregatorMs + 30_000;
+  const quorumGraceMs = readNonNegativeMs(timeoutSource, "quorum_grace_ms", 0);
+  const computedHardCapMs =
+    councillorMs + councillorRetryMs + aggregatorMs + quorumGraceMs + 30_000;
   const hasExplicitHardCap =
     typeof timeoutSource.hard_cap_ms === "number" &&
     Number.isFinite(timeoutSource.hard_cap_ms);
@@ -129,13 +146,28 @@ export function parseCouncilConfig(
       councillor_ms: councillorMs,
       councillor_retry_ms: councillorRetryMs,
       aggregator_ms: aggregatorMs,
+      quorum_grace_ms: quorumGraceMs,
     });
   }
+
+  const quorum = (() => {
+    const raw = source.quorum;
+    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 2 && raw <= models.length) {
+      return raw;
+    }
+    if (raw !== undefined) {
+      warn(
+        `Invalid council.quorum: ${JSON.stringify(raw)}. Must be integer in [2, ${models.length}]. Falling back to ${models.length}.`,
+      );
+    }
+    return models.length;
+  })();
 
   return {
     reviewer: optionalAgentName(source.reviewer, BUNDLED_REVIEWER_AGENT),
     aggregator: optionalAgentName(source.aggregator, BUNDLED_AGGREGATOR_AGENT),
     models,
+    quorum,
     aggregator_model: aggregatorModel,
     reviewer_temperature: readReviewerTemperature(source),
     reviewer_permission: readPermissionOverride(source.reviewer_permission, warn),
@@ -144,6 +176,7 @@ export function parseCouncilConfig(
       councillor_ms: councillorMs,
       councillor_retry_ms: councillorRetryMs,
       aggregator_ms: aggregatorMs,
+      quorum_grace_ms: quorumGraceMs,
       hard_cap_ms: hardCapMs,
     },
   };

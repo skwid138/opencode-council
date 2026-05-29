@@ -14,6 +14,7 @@ export type TimeoutConfig = {
   councillor_ms: number;
   councillor_retry_ms: number;
   aggregator_ms: number;
+  quorum_grace_ms: number;
   hard_cap_ms: number;
 };
 
@@ -29,6 +30,7 @@ export type CouncilConfig = {
   aggregator: string;
   debug: boolean;
   models: ModelConfig[];
+  quorum: number;
   aggregator_model: ModelConfig | null;
   reviewer_temperature: number | null;
   reviewer_permission: PermissionOverrideConfig | null;
@@ -53,11 +55,16 @@ export type CouncillorFailure = {
   error: string;
 };
 
+export type CouncillorAborted = {
+  model: ModelConfig;
+};
+
 export type WarningLogger = (message: string, extra?: Record<string, unknown>) => void;
 
 export type ReviewState = {
   activeSessions: Set<string>;
   hardCapTimedOut: boolean;
+  quorumReached: boolean;
 };
 
 export function isModelConfig(value: unknown): value is ModelConfig {
