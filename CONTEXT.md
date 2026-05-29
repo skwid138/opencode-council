@@ -37,11 +37,11 @@ Plugin diagnostics written via `ctx.client.app.log()` to opencode's log system. 
 _Avoid_: console output, stderr logging
 
 **Phase timeout**:
-The individual timeout governing one phase of the council operation (councillor attempt, councillor retry, aggregator). Independent of the hard cap.
+The individual timeout governing one phase of the council operation (councillor request, aggregator, quorum grace). Independent of the hard cap.
 _Avoid_: step timeout, inner timeout
 
 **Computed hard cap**:
-The default hard cap derived from `councillor + retry + aggregator + quorum_grace + 30s buffer` when no explicit `hard_cap_ms` is configured.
+The default hard cap derived from `councillor + aggregator + quorum_grace + 30s buffer` when no explicit `hard_cap_ms` is configured.
 _Avoid_: auto timeout, dynamic cap
 
 **#28037 workaround (catch-all allows)**:
