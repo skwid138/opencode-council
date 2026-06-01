@@ -16,6 +16,12 @@ import {
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
+const NON_DEFAULT_PHASE_TIMEOUTS = {
+  councillor_ms: 2_000,
+  aggregator_ms: 4_000,
+  quorum_grace_ms: 5_000,
+};
+const NON_DEFAULT_COMPUTED_HARD_CAP_MS = 41_000;
 
 function models(count: number) {
   return Array.from({ length: count }, (_value, index) => ({
@@ -351,6 +357,81 @@ describe("parseCouncilConfig", () => {
         }),
       }).timeouts.hard_cap_ms,
     ).toBe(41_000);
+  });
+
+  it("uses the computed hard cap when hard_cap_ms is an invalid string", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        timeouts: {
+          ...NON_DEFAULT_PHASE_TIMEOUTS,
+          hard_cap_ms: "180000",
+        },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(NON_DEFAULT_COMPUTED_HARD_CAP_MS);
+  });
+
+  it("uses the computed hard cap when hard_cap_ms is NaN", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        timeouts: {
+          ...NON_DEFAULT_PHASE_TIMEOUTS,
+          hard_cap_ms: NaN,
+        },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(NON_DEFAULT_COMPUTED_HARD_CAP_MS);
+  });
+
+  it("uses the computed hard cap when hard_cap_ms is null", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        timeouts: {
+          ...NON_DEFAULT_PHASE_TIMEOUTS,
+          hard_cap_ms: null,
+        },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(NON_DEFAULT_COMPUTED_HARD_CAP_MS);
+  });
+
+  it("uses the computed hard cap when hard_cap_ms is Infinity", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        timeouts: {
+          ...NON_DEFAULT_PHASE_TIMEOUTS,
+          hard_cap_ms: Infinity,
+        },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(NON_DEFAULT_COMPUTED_HARD_CAP_MS);
+  });
+
+  it("uses the computed hard cap when hard_cap_ms is omitted", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        timeouts: NON_DEFAULT_PHASE_TIMEOUTS,
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(NON_DEFAULT_COMPUTED_HARD_CAP_MS);
+  });
+
+  it("preserves a valid explicit hard_cap_ms", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        timeouts: {
+          ...NON_DEFAULT_PHASE_TIMEOUTS,
+          hard_cap_ms: 200_000,
+        },
+      }),
+    });
+
+    expect(config.timeouts.hard_cap_ms).toBe(200_000);
   });
 
   it("honors explicit hard caps and warns when below the computed budget", () => {
