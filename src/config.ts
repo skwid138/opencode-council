@@ -133,11 +133,7 @@ export function parseCouncilConfig(
   const hasExplicitHardCap =
     typeof timeoutSource.hard_cap_ms === "number" &&
     Number.isFinite(timeoutSource.hard_cap_ms);
-  const hardCapMs = readTimeoutMs(
-    timeoutSource,
-    "hard_cap_ms",
-    hasExplicitHardCap ? DEFAULT_HARD_CAP_MS : computedHardCapMs,
-  );
+  const hardCapMs = readTimeoutMs(timeoutSource, "hard_cap_ms", computedHardCapMs);
 
   if (hasExplicitHardCap && hardCapMs < computedHardCapMs) {
     warn("Configured hard_cap_ms is below computed phase timeout budget; honoring explicit hard cap", {
