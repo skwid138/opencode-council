@@ -5,11 +5,13 @@ import {
   type CouncilConfig,
   isModelConfig,
   isPlainObject,
+  type ModelConfig,
   type TimeoutConfig,
   type WarningLogger,
 } from "./types";
 
 export const COUNCILLOR_TIMEOUT_MS = 270_000;
+export const OPTIONAL_COUNCILLOR_TIMEOUT_MS = 60_000;
 export const AGGREGATOR_TIMEOUT_MS = 120_000;
 export const DEFAULT_HARD_CAP_MS = COUNCILLOR_TIMEOUT_MS + AGGREGATOR_TIMEOUT_MS + 30_000;
 export const REVIEWER_TEMPERATURE_IGNORED_WARNING =
@@ -91,6 +93,59 @@ export function readReviewerTemperature(source: Record<string, unknown>): number
   return raw;
 }
 
+export function normalizeModelConfig(raw: ModelConfig, warn: WarningLogger): ModelConfig {
+  const normalized: ModelConfig = {
+    providerID: raw.providerID,
+    modelID: raw.modelID,
+  };
+  const optional = (raw as Record<string, unknown>).optional;
+
+  if (optional === undefined) return normalized;
+  if (typeof optional === "boolean") {
+    normalized.optional = optional;
+    return normalized;
+  }
+
+  warn("council.models optional flag must be boolean; treating model as required", {
+    providerID: raw.providerID,
+    modelID: raw.modelID,
+    optional,
+  });
+  normalized.optional = false;
+  return normalized;
+}
+
+function hasExplicitPositiveTimeout(source: Record<string, unknown>, key: string): boolean {
+  const raw = source[key];
+  return (
+    Object.prototype.hasOwnProperty.call(source, key) &&
+    typeof raw === "number" &&
+    Number.isFinite(raw) &&
+    raw > 0
+  );
+}
+
+function readOptionalCouncillorMs(
+  timeoutSource: Record<string, unknown>,
+  councillorMs: number,
+  warn: WarningLogger,
+): number {
+  const hasExplicitOptional = hasExplicitPositiveTimeout(timeoutSource, "optional_councillor_ms");
+  const parsed = hasExplicitOptional
+    ? readTimeoutMs(timeoutSource, "optional_councillor_ms", OPTIONAL_COUNCILLOR_TIMEOUT_MS)
+    : OPTIONAL_COUNCILLOR_TIMEOUT_MS;
+
+  if (parsed <= councillorMs) return parsed;
+
+  if (hasExplicitOptional) {
+    warn("optional_councillor_ms cannot exceed councillor_ms; clamping to councillor_ms", {
+      optional_councillor_ms: parsed,
+      councillor_ms: councillorMs,
+    });
+  }
+  return councillorMs;
+}
+
 export function parseCouncilConfig(
   raw: unknown,
   warn: WarningLogger = () => {},
@@ -108,14 +163,29 @@ export function parseCouncilConfig(
     throw new Error("council.models is required");
   }
 
-  const models = source.models.filter(isModelConfig);
-  if (models.length < 2) {
-    throw new Error("council.models must include at least 2 valid model entries");
+  const models = source.models
+    .filter(isModelConfig)
+    .map((model) => normalizeModelConfig(model, warn));
+  const requiredCount = models.filter((model) => !model.optional).length;
+  if (requiredCount < 2) {
+    throw new Error("council.models must include at least 2 required (non-optional) model entries");
   }
 
-  const aggregatorModel = isModelConfig(source.aggregator_model)
-    ? source.aggregator_model
-    : null;
+  const aggregatorModel = (() => {
+    const raw = source.aggregator_model;
+    if (!isModelConfig(raw)) return null;
+
+    const aggOptional = (raw as Record<string, unknown>).optional;
+    if (aggOptional !== undefined && aggOptional !== false) {
+      warn("council.aggregator_model cannot be optional; ignoring optional flag", {
+        providerID: raw.providerID,
+        modelID: raw.modelID,
+        optional: aggOptional,
+      });
+    }
+
+    return { providerID: raw.providerID, modelID: raw.modelID };
+  })();
 
   const councillorMs = readTimeoutMs(
     timeoutSource,
@@ -127,6 +197,7 @@ export function parseCouncilConfig(
     "aggregator_ms",
     AGGREGATOR_TIMEOUT_MS,
   );
+  const optionalCouncillorMs = readOptionalCouncillorMs(timeoutSource, councillorMs, warn);
   const quorumGraceMs = readNonNegativeMs(timeoutSource, "quorum_grace_ms", 0);
   const computedHardCapMs =
     councillorMs + aggregatorMs + quorumGraceMs + 30_000;
@@ -147,15 +218,15 @@ export function parseCouncilConfig(
 
   const quorum = (() => {
     const raw = source.quorum;
-    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 2 && raw <= models.length) {
+    if (typeof raw === "number" && Number.isInteger(raw) && raw >= 2 && raw <= requiredCount) {
       return raw;
     }
     if (raw !== undefined) {
       warn(
-        `Invalid council.quorum: ${JSON.stringify(raw)}. Must be integer in [2, ${models.length}]. Falling back to ${models.length}.`,
+        `Invalid council.quorum: ${JSON.stringify(raw)}. Must be integer in [2, ${requiredCount}]. Falling back to ${requiredCount}.`,
       );
     }
-    return models.length;
+    return requiredCount;
   })();
 
   return {
@@ -169,6 +240,7 @@ export function parseCouncilConfig(
     aggregator_permission: readPermissionOverride(source.aggregator_permission, warn),
     timeouts: {
       councillor_ms: councillorMs,
+      optional_councillor_ms: optionalCouncillorMs,
       aggregator_ms: aggregatorMs,
       quorum_grace_ms: quorumGraceMs,
       hard_cap_ms: hardCapMs,

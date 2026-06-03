@@ -47,6 +47,8 @@ async function runCouncilReviewInner(
   const successes: CouncillorSuccess[] = [];
   const failures: CouncillorFailure[] = [];
   const aborted: CouncillorAborted[] = [];
+  const requiredCount = councilConfig.models.filter((model) => !model.optional).length;
+  let requiredSuccessCount = 0;
 
   let resolveQuorum: () => void = () => {};
   const quorumPromise = new Promise<void>((resolve) => {
@@ -70,7 +72,10 @@ async function runCouncilReviewInner(
         if (states[index] !== "pending") return;
         states[index] = "success";
         successes.push(value);
-        if (successes.length === councilConfig.quorum) resolveQuorum();
+        if (!value.model.optional) {
+          requiredSuccessCount++;
+          if (requiredSuccessCount === councilConfig.quorum) resolveQuorum();
+        }
       },
       (error) => {
         if (states[index] !== "pending") return;
@@ -83,7 +88,7 @@ async function runCouncilReviewInner(
 
   await Promise.race([quorumPromise, allFinished]);
 
-  if (successes.length >= councilConfig.quorum && states.some((state) => state === "pending")) {
+  if (requiredSuccessCount >= councilConfig.quorum && states.some((state) => state === "pending")) {
     reviewState.quorumReached = true;
 
     if (councilConfig.timeouts.quorum_grace_ms > 0) {
@@ -117,16 +122,17 @@ async function runCouncilReviewInner(
   }
 
   if (successes.length < 2) {
-    return `Error: council_review received fewer than 2 successful councillor responses (${successes.length}/${councilConfig.models.length}). caller should fall back to a single reviewer.
+    const fallbackLabelOptions = { includeOptionalMarker: true };
+    return `Error: council_review received fewer than 2 successful councillor responses (${successes.length}/${councilConfig.models.length}; required: ${requiredSuccessCount}/${requiredCount}). caller should fall back to a single reviewer.
 
 Successful councillors:
-${successes.length === 0 ? "none" : successes.map((success) => `- ${modelLabel(success.model)}`).join("\n")}
+${successes.length === 0 ? "none" : successes.map((success) => `- ${modelLabel(success.model, fallbackLabelOptions)}`).join("\n")}
 
 Failed councillors:
-${formatFailureSummary(failures)}${aborted.length > 0 ? `
+${formatFailureSummary(failures, fallbackLabelOptions)}${aborted.length > 0 ? `
 
 Aborted councillors:
-${formatAbortedSummary(aborted)}` : ""}`;
+${formatAbortedSummary(aborted, fallbackLabelOptions)}` : ""}`;
   }
 
   return await synthesizeWithAggregator(ctx, councilConfig, log, {

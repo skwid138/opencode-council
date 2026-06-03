@@ -124,7 +124,9 @@ export async function promptAndExtract(
     parts: [{ type: "text", text: input.prompt }],
   };
 
-  if (input.model) body.model = input.model;
+  if (input.model) {
+    body.model = { providerID: input.model.providerID, modelID: input.model.modelID };
+  }
   if (input.tools) body.tools = input.tools;
 
   const promptResult = await ctx.client.session.prompt({

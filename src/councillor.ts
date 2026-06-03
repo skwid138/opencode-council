@@ -109,9 +109,12 @@ export async function runCouncillor(
     reviewState: ReviewState;
   },
 ): Promise<CouncillorSuccess> {
+  const timeoutMs = input.model.optional
+    ? councilConfig.timeouts.optional_councillor_ms
+    : councilConfig.timeouts.councillor_ms;
   const response = await runCouncillorAttempt(ctx, councilConfig, log, {
     ...input,
-    timeoutMs: councilConfig.timeouts.councillor_ms,
+    timeoutMs,
   });
   return { model: input.model, response, attempts: 1 /* #19 selective retry follow-up */ };
 }

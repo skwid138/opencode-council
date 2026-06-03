@@ -272,6 +272,60 @@ describe("promptAndExtract", () => {
     });
   });
 
+  it("strips optional and arbitrary fields from councillor model payloads", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
+
+    await promptAndExtract(createContext(session) as never, {
+      sessionID: "child",
+      agent: "reviewer",
+      prompt: "review this",
+      model: { providerID: "provider", modelID: "model", optional: true, extra: "removed" } as never,
+    });
+
+    expect(session.prompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({ model: { providerID: "provider", modelID: "model" } }),
+      }),
+    );
+  });
+
+  it("strips optional and arbitrary fields from aggregator model payloads", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
+
+    await promptAndExtract(createContext(session) as never, {
+      sessionID: "child",
+      agent: "aggregator",
+      prompt: "aggregate this",
+      model: { providerID: "provider", modelID: "model", optional: true, extra: "removed" } as never,
+    });
+
+    expect(session.prompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({ model: { providerID: "provider", modelID: "model" } }),
+      }),
+    );
+  });
+
+  it("omits model from the prompt body when no model is provided", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
+
+    await promptAndExtract(createContext(session) as never, {
+      sessionID: "child",
+      agent: "aggregator",
+      prompt: "aggregate this",
+    });
+
+    expect((session.prompt.mock.calls[0][0] as { body: Record<string, unknown> }).body).not.toHaveProperty(
+      "model",
+    );
+  });
+
   it("throws on prompt, messages, and empty-response failures", async () => {
     const promptFailure = createSessionMocks();
     promptFailure.prompt.mockResolvedValueOnce({ error: "bad prompt" });

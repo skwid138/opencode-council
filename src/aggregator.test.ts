@@ -7,10 +7,12 @@ import {
   formatFailureSummary,
   synthesizeWithAggregator,
 } from "./aggregator";
+import { modelLabel } from "./logging";
 import type { CouncilConfig, CouncillorSuccess, ReviewState } from "./types";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
+const OPTIONAL_MODEL = { providerID: "provider-c", modelID: "model-c", optional: true };
 
 function createSessionMocks() {
   return {
@@ -80,6 +82,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 180_000,
+      optional_councillor_ms: 60_000,
       aggregator_ms: 120_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 420_000,
@@ -118,12 +121,103 @@ describe("buildAggregatorPrompt", () => {
       }),
     ).toContain("Failed or timed out:\n- none");
   });
+
+  it("marks optional successes across headings and responded lists", () => {
+    const prompt = buildAggregatorPrompt({
+      originalPrompt: "review this",
+      successes: [success(MODEL_A, "required response"), success(OPTIONAL_MODEL, "optional response")],
+      failures: [],
+      aborted: [],
+    });
+
+    expect(prompt).toContain("## Reviewer 1: provider-a/model-a\n");
+    expect(prompt).toContain("## Reviewer 2: provider-c/model-c (optional)");
+    expect(prompt).toContain("- provider-a/model-a\n- provider-c/model-c (optional)");
+  });
+
+  it("marks optional failures and aborted councillors in participation lists and sections", () => {
+    const prompt = buildAggregatorPrompt({
+      originalPrompt: "review this",
+      successes: [success(MODEL_A, "required response")],
+      failures: [{ model: OPTIONAL_MODEL, error: "failed" }],
+      aborted: [{ model: { providerID: "provider-d", modelID: "model-d", optional: true } }],
+    });
+
+    expect(prompt).toContain("- provider-c/model-c (optional): failed");
+    expect(prompt).toContain("Aborted (quorum reached):\n- provider-d/model-d (optional)");
+    expect(prompt).toContain("## Aborted (quorum reached)\n\n- provider-d/model-d (optional)");
+  });
+
+  it("does not add optional markers for all-required prompts", () => {
+    const prompt = buildAggregatorPrompt({
+      originalPrompt: "review this",
+      successes: [success(MODEL_A, "response a"), success(MODEL_B, "response b")],
+      failures: [{ model: { providerID: "provider-c", modelID: "model-c" }, error: "failed" }],
+      aborted: [{ model: { providerID: "provider-d", modelID: "model-d" } }],
+    });
+
+    expect(prompt).not.toContain("(optional)");
+  });
+
+  it("keeps the all-required no-abort prompt byte-identical to the frozen baseline", () => {
+    const prompt = buildAggregatorPrompt({
+      originalPrompt: "review this",
+      successes: [success(MODEL_A, "response a"), success(MODEL_B, "response b")],
+      failures: [],
+      aborted: [],
+    });
+
+    expect(prompt).toBe(`You are aggregating multiple reviewer responses to one review prompt.
+
+Do structural aggregation only. Do not issue your own verdict.
+
+# Original review prompt
+
+review this
+
+# Participation summary supplied by council_review
+
+Responded:
+- provider-a/model-a
+- provider-b/model-b
+
+Failed or timed out:
+- none
+
+# Reviewer responses
+
+## Reviewer 1: provider-a/model-a
+
+response a
+
+---
+
+## Reviewer 2: provider-b/model-b
+
+response b`);
+  });
+});
+
+describe("modelLabel", () => {
+  it("marks optional models only when requested", () => {
+    expect(modelLabel(MODEL_A, { includeOptionalMarker: true })).toBe("provider-a/model-a");
+    expect(modelLabel(OPTIONAL_MODEL)).toBe("provider-c/model-c");
+    expect(modelLabel(OPTIONAL_MODEL, { includeOptionalMarker: true })).toBe(
+      "provider-c/model-c (optional)",
+    );
+  });
 });
 
 describe("formatAbortedSummary", () => {
   it("formats aborted councillors or none", () => {
     expect(formatAbortedSummary([])).toBe("none");
     expect(formatAbortedSummary([{ model: MODEL_A }])).toBe("- provider-a/model-a");
+  });
+
+  it("marks optional aborted councillors when requested", () => {
+    expect(formatAbortedSummary([{ model: OPTIONAL_MODEL }], { includeOptionalMarker: true })).toBe(
+      "- provider-c/model-c (optional)",
+    );
   });
 });
 

@@ -70,6 +70,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 120_000,
+      optional_councillor_ms: 60_000,
       aggregator_ms: 120_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 360_000,
@@ -216,6 +217,44 @@ describe("runCouncillor", () => {
       }),
     ).rejects.toThrow("prompt failed: single failed");
     expect(session.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the optional councillor timeout for optional models", async () => {
+    const session = createSessionMocks();
+    const slowPrompt = deferred<Record<string, unknown>>();
+    const log = vi.fn();
+    const optionalModel = { ...MODEL_A, optional: true };
+    session.create.mockResolvedValueOnce({ data: { id: "optional-session" } });
+    session.prompt.mockReturnValue(slowPrompt.promise);
+    session.messages.mockResolvedValue({ data: assistantMessages("late response") });
+
+    await expect(
+      runCouncillor(
+        createContext(session) as never,
+        councilConfig({
+          timeouts: {
+            ...councilConfig().timeouts,
+            councillor_ms: 10_000,
+            optional_councillor_ms: 50,
+          },
+        }),
+        log,
+        {
+          parentSessionID: "parent",
+          prompt: "review this",
+          model: optionalModel,
+          directory: "/dir",
+          reviewerPermission: [],
+          reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
+        },
+      ),
+    ).rejects.toThrow("provider-a/model-a timed out");
+
+    expect(log).toHaveBeenCalledWith("debug", "councillor request timed out", {
+      model: "provider-a/model-a",
+      timeout_ms: 50,
+    });
+    slowPrompt.resolve({});
   });
 
   it("propagates the hard-cap short-circuit from createChildSession", async () => {

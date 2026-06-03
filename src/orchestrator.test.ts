@@ -75,6 +75,7 @@ function councilConfig(overrides: Partial<CouncilConfig> = {}): CouncilConfig {
     aggregator_permission: null,
     timeouts: {
       councillor_ms: 1_000,
+      optional_councillor_ms: 60_000,
       aggregator_ms: 1_000,
       quorum_grace_ms: 0,
       hard_cap_ms: 5_000,
@@ -144,12 +145,73 @@ describe("runCouncilReview", () => {
       "parent-session",
     );
 
-    expect(result).toContain("fewer than 2 successful councillor responses (1/2)");
+    expect(result).toContain("fewer than 2 successful councillor responses (1/2; required: 1/2)");
     expect(result).toContain("provider-a/model-a");
     expect(session.create).toHaveBeenCalledTimes(2);
     expect(session.prompt).not.toHaveBeenCalledWith(
       expect.objectContaining({ body: expect.objectContaining({ agent: "aggregator" }) }),
     );
+  });
+
+  it("includes required-only counts in fallback guidance for mixed councils", async () => {
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a") return {};
+      return { error: "failed" };
+    });
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("one response") });
+
+    const result = await runCouncilReview(
+      createContext(session) as never,
+      councilConfig({ models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }], quorum: 2 }),
+      vi.fn(),
+      undefined,
+      "review this",
+      "parent-session",
+    );
+
+    expect(result).toContain(
+      "fewer than 2 successful councillor responses (1/3; required: 1/2)",
+    );
+  });
+
+  it("marks optional councillors but not required councillors in fallback guidance", async () => {
+    const session = createSessionMocks();
+    const optionalD = { providerID: "provider-d", modelID: "model-d", optional: true };
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-d" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-c") return {};
+      if (input.path.id === "reviewer-d") return { error: "optional failed" };
+      return { error: "required failed" };
+    });
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("optional response") });
+
+    const result = await runCouncilReview(
+      createContext(session) as never,
+      councilConfig({
+        models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }, optionalD],
+        quorum: 2,
+      }),
+      vi.fn(),
+      undefined,
+      "review this",
+      "parent-session",
+    );
+
+    expect(result).toContain("Successful councillors:\n- provider-c/model-c (optional)");
+    expect(result).toContain("- provider-d/model-d (optional): prompt failed: optional failed");
+    expect(result).toContain("- provider-a/model-a: prompt failed: required failed");
+    expect(result).toContain("- provider-b/model-b: prompt failed: required failed");
+    expect(result).not.toContain("provider-a/model-a (optional)");
+    expect(result).not.toContain("provider-b/model-b (optional)");
   });
 
   it("layers cached workspace permission rules and reviewer overrides", async () => {
@@ -300,6 +362,192 @@ describe("runCouncilReview", () => {
     laggardPrompt.resolve({});
   });
 
+  it("times out optional councillors using optional_councillor_ms", async () => {
+    vi.useFakeTimers();
+    const session = createSessionMocks();
+    const optionalPrompt = deferred<Record<string, unknown>>();
+    const log = vi.fn();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-b") return { error: "required failed" };
+      if (input.path.id === "reviewer-c") return await optionalPrompt.promise;
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a") return { data: assistantMessages("response a") };
+      return { data: assistantMessages("late optional") };
+    });
+
+    const result = runCouncilReview(
+      createContext(session) as never,
+      councilConfig({
+        models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
+        quorum: 2,
+        timeouts: {
+          ...councilConfig().timeouts,
+          councillor_ms: 10_000,
+          optional_councillor_ms: 50,
+          hard_cap_ms: 20_000,
+        },
+      }),
+      log,
+      undefined,
+      "review this",
+      "parent-session",
+    );
+
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(result).resolves.toContain("fewer than 2 successful councillor responses");
+    expect(log).toHaveBeenCalledWith("debug", "councillor request timed out", {
+      model: "provider-c/model-c",
+      timeout_ms: 50,
+    });
+    optionalPrompt.resolve({});
+  });
+
+  it("does not let optional successes satisfy required quorum", async () => {
+    const session = createSessionMocks();
+    const requiredPrompt = deferred<Record<string, unknown>>();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-b") return await requiredPrompt.promise;
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a") return { data: assistantMessages("required response a") };
+      if (input.path.id === "reviewer-b") return { data: assistantMessages("required response b") };
+      if (input.path.id === "reviewer-c") return { data: assistantMessages("optional response") };
+      return { data: assistantMessages("aggregated response") };
+    });
+
+    const result = runCouncilReview(
+      createContext(session) as never,
+      councilConfig({
+        models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
+        quorum: 2,
+      }),
+      vi.fn(),
+      undefined,
+      "review this",
+      "parent-session",
+    );
+
+    await flushMicrotasks();
+    expect(session.create).toHaveBeenCalledTimes(3);
+
+    requiredPrompt.resolve({});
+
+    await expect(result).resolves.toBe("aggregated response");
+    expect(aggregatorPrompt(session)).toContain("provider-b/model-b");
+    expect(aggregatorPrompt(session)).not.toContain("## Aborted (quorum reached)");
+  });
+
+  it("runs aggregation with all-required successes unchanged", async () => {
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockResolvedValue({});
+    session.messages
+      .mockResolvedValueOnce({ data: assistantMessages("response a") })
+      .mockResolvedValueOnce({ data: assistantMessages("response b") })
+      .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
+
+    await expect(
+      runCouncilReview(
+        createContext(session) as never,
+        councilConfig(),
+        vi.fn(),
+        undefined,
+        "review this",
+        "parent-session",
+      ),
+    ).resolves.toBe("aggregated response");
+
+    expect(aggregatorPrompt(session)).toContain("provider-a/model-a");
+    expect(aggregatorPrompt(session)).toContain("provider-b/model-b");
+  });
+
+  it("aggregates when required quorum is unmet but one required and one optional succeed", async () => {
+    const session = createSessionMocks();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-b") return { error: "required failed" };
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a") return { data: assistantMessages("required response") };
+      if (input.path.id === "reviewer-c") return { data: assistantMessages("optional response") };
+      return { data: assistantMessages("aggregated response") };
+    });
+
+    await expect(
+      runCouncilReview(
+        createContext(session) as never,
+        councilConfig({ models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }], quorum: 2 }),
+        vi.fn(),
+        undefined,
+        "review this",
+        "parent-session",
+      ),
+    ).resolves.toBe("aggregated response");
+
+    expect(aggregatorPrompt(session)).toContain("provider-c/model-c");
+  });
+
+  it("aggregates when all required fail but at least two optional councillors succeed", async () => {
+    const session = createSessionMocks();
+    const optionalD = { providerID: "provider-d", modelID: "model-d", optional: true };
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-d" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a" || input.path.id === "reviewer-b") {
+        return { error: "required failed" };
+      }
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-c") return { data: assistantMessages("optional response c") };
+      if (input.path.id === "reviewer-d") return { data: assistantMessages("optional response d") };
+      return { data: assistantMessages("aggregated response") };
+    });
+
+    await expect(
+      runCouncilReview(
+        createContext(session) as never,
+        councilConfig({
+          models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }, optionalD],
+          quorum: 2,
+        }),
+        vi.fn(),
+        undefined,
+        "review this",
+        "parent-session",
+      ),
+    ).resolves.toBe("aggregated response");
+
+    expect(aggregatorPrompt(session)).toContain("provider-c/model-c");
+    expect(aggregatorPrompt(session)).toContain("provider-d/model-d");
+  });
+
   it("lets a laggard success join during the quorum grace window", async () => {
     vi.useFakeTimers();
     const session = createSessionMocks();
@@ -345,6 +593,134 @@ describe("runCouncilReview", () => {
     await expect(result).resolves.toBe("aggregated response");
     expect(aggregatorPrompt(session)).toContain("provider-c/model-c");
     expect(aggregatorPrompt(session)).not.toContain("Aborted");
+  });
+
+  it("records an optional success during the quorum grace window", async () => {
+    vi.useFakeTimers();
+    const session = createSessionMocks();
+    const promptA = deferred<Record<string, unknown>>();
+    const promptB = deferred<Record<string, unknown>>();
+    const optionalPrompt = deferred<Record<string, unknown>>();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a") return await promptA.promise;
+      if (input.path.id === "reviewer-b") return await promptB.promise;
+      if (input.path.id === "reviewer-c") return await optionalPrompt.promise;
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-c") return { data: assistantMessages("optional response") };
+      if (input.path.id === "aggregator-session") return { data: assistantMessages("aggregated response") };
+      return { data: assistantMessages(`required response for ${input.path.id}`) };
+    });
+
+    const result = runCouncilReview(
+      createContext(session) as never,
+      councilConfig({
+        models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
+        quorum: 2,
+        timeouts: { ...councilConfig().timeouts, quorum_grace_ms: 50 },
+      }),
+      vi.fn(),
+      undefined,
+      "review this",
+      "parent-session",
+    );
+
+    promptA.resolve({});
+    promptB.resolve({});
+    await flushMicrotasks();
+    optionalPrompt.resolve({});
+
+    await expect(result).resolves.toBe("aggregated response");
+    expect(aggregatorPrompt(session)).toContain("provider-c/model-c");
+    expect(aggregatorPrompt(session)).not.toContain("Aborted");
+  });
+
+  it("records an optional failure during the quorum grace window", async () => {
+    vi.useFakeTimers();
+    const session = createSessionMocks();
+    const promptA = deferred<Record<string, unknown>>();
+    const promptB = deferred<Record<string, unknown>>();
+    const optionalPrompt = deferred<Record<string, unknown>>();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-a") return await promptA.promise;
+      if (input.path.id === "reviewer-b") return await promptB.promise;
+      if (input.path.id === "reviewer-c") return await optionalPrompt.promise;
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "aggregator-session") return { data: assistantMessages("aggregated response") };
+      return { data: assistantMessages(`required response for ${input.path.id}`) };
+    });
+
+    const result = runCouncilReview(
+      createContext(session) as never,
+      councilConfig({
+        models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
+        quorum: 2,
+        timeouts: { ...councilConfig().timeouts, quorum_grace_ms: 50 },
+      }),
+      vi.fn(),
+      undefined,
+      "review this",
+      "parent-session",
+    );
+
+    promptA.resolve({});
+    promptB.resolve({});
+    await flushMicrotasks();
+    optionalPrompt.resolve({ error: "optional failed" });
+
+    await expect(result).resolves.toBe("aggregated response");
+    expect(aggregatorPrompt(session)).toContain("provider-c/model-c (optional): prompt failed: optional failed");
+    expect(aggregatorPrompt(session)).not.toContain("Aborted");
+  });
+
+  it("keeps late optional success out after laggard sweep marks it aborted", async () => {
+    const session = createSessionMocks();
+    const optionalPrompt = deferred<Record<string, unknown>>();
+    session.create
+      .mockResolvedValueOnce({ data: { id: "reviewer-a" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-b" } })
+      .mockResolvedValueOnce({ data: { id: "reviewer-c" } })
+      .mockResolvedValueOnce({ data: { id: "aggregator-session" } });
+    session.prompt.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-c") return await optionalPrompt.promise;
+      return {};
+    });
+    session.messages.mockImplementation(async (input: { path: { id: string } }) => {
+      if (input.path.id === "reviewer-c") return { data: assistantMessages("late optional") };
+      if (input.path.id === "aggregator-session") return { data: assistantMessages("aggregated response") };
+      return { data: assistantMessages(`required response for ${input.path.id}`) };
+    });
+
+    await expect(
+      runCouncilReview(
+        createContext(session) as never,
+        councilConfig({ models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }], quorum: 2 }),
+        vi.fn(),
+        undefined,
+        "review this",
+        "parent-session",
+      ),
+    ).resolves.toBe("aggregated response");
+
+    optionalPrompt.resolve({});
+    await flushMicrotasks();
+
+    expect(aggregatorPrompt(session)).toContain("## Aborted (quorum reached)");
+    expect(aggregatorPrompt(session)).toContain("- provider-c/model-c");
+    expect(aggregatorPrompt(session)).not.toContain("late optional");
   });
 
   it("clears the quorum grace timer when all councillors finish during grace", async () => {

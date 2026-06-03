@@ -6,13 +6,16 @@ import {
   councilOptions,
   DEFAULT_HARD_CAP_MS,
   hasUserSpecifiedAgent,
+  normalizeModelConfig,
   optionalAgentName,
+  OPTIONAL_COUNCILLOR_TIMEOUT_MS,
   parseCouncilConfig,
   readReviewerTemperature,
   readTimeoutMs,
   REVIEWER_TEMPERATURE_IGNORED_WARNING,
   resolveDebug,
 } from "./config";
+import { isModelConfig } from "./types";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
@@ -76,6 +79,35 @@ describe("config helpers", () => {
     expect(() => readReviewerTemperature({ reviewer_temperature: 3 })).toThrow(
       "council.reviewer_temperature must be a finite number between 0 and 2",
     );
+  });
+
+  it.each([
+    ["missing", { providerID: "provider", modelID: "model" }, { providerID: "provider", modelID: "model" }, false],
+    ["undefined", { providerID: "provider", modelID: "model", optional: undefined }, { providerID: "provider", modelID: "model" }, false],
+    ["true", { providerID: "provider", modelID: "model", optional: true }, { providerID: "provider", modelID: "model", optional: true }, false],
+    ["false", { providerID: "provider", modelID: "model", optional: false }, { providerID: "provider", modelID: "model", optional: false }, false],
+    ["string", { providerID: "provider", modelID: "model", optional: "yes" }, { providerID: "provider", modelID: "model", optional: false }, true],
+    ["number", { providerID: "provider", modelID: "model", optional: 1 }, { providerID: "provider", modelID: "model", optional: false }, true],
+    ["null", { providerID: "provider", modelID: "model", optional: null }, { providerID: "provider", modelID: "model", optional: false }, true],
+  ])("normalizes model optional flag for %s", (_label, raw, expected, shouldWarn) => {
+    const warn = vi.fn();
+
+    expect(normalizeModelConfig({ ...raw, stray: "removed" } as never, warn)).toEqual(expected);
+    if (shouldWarn) {
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("council.models optional flag must be boolean"),
+        expect.objectContaining({ providerID: "provider", modelID: "model" }),
+      );
+    } else {
+      expect(warn).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps isModelConfig narrow and side-effect free", () => {
+    const raw = { providerID: "provider", modelID: "model", optional: "yes" };
+
+    expect(isModelConfig(raw)).toBe(true);
+    expect(raw).toEqual({ providerID: "provider", modelID: "model", optional: "yes" });
   });
 });
 
@@ -229,13 +261,28 @@ describe("parseCouncilConfig", () => {
     expect(envSetConfig).toEqual(envUnsetConfig);
   });
 
-  it("throws when models are missing or fewer than two are valid", () => {
+  it("throws when models are missing or fewer than two are required", () => {
     expect(() => parseCouncilConfig({ council: {} })).toThrow("council.models is required");
     expect(() =>
       parseCouncilConfig({
         council: validCouncil({ models: [MODEL_A, { providerID: "", modelID: "bad" }] }),
       }),
-    ).toThrow("council.models must include at least 2 valid model entries");
+    ).toThrow("council.models must include at least 2 required (non-optional) model entries");
+  });
+
+  it("throws when fewer than two model entries are required", () => {
+    expect(() =>
+      parseCouncilConfig({
+        council: validCouncil({
+          models: [MODEL_A, ...models(3).map((model) => ({ ...model, optional: true }))],
+        }),
+      }),
+    ).toThrow("council.models must include at least 2 required (non-optional) model entries");
+    expect(() =>
+      parseCouncilConfig({
+        council: validCouncil({ models: models(5).map((model) => ({ ...model, optional: true })) }),
+      }),
+    ).toThrow("council.models must include at least 2 required (non-optional) model entries");
   });
 
   it("computes default hard caps from default and configured phase timeouts", () => {
@@ -243,6 +290,7 @@ describe("parseCouncilConfig", () => {
       parseCouncilConfig({ council: { models: [MODEL_A, MODEL_B] } }).timeouts,
     ).toEqual({
       councillor_ms: 270_000,
+      optional_councillor_ms: OPTIONAL_COUNCILLOR_TIMEOUT_MS,
       aggregator_ms: AGGREGATOR_TIMEOUT_MS,
       quorum_grace_ms: 0,
       hard_cap_ms: DEFAULT_HARD_CAP_MS,
@@ -299,6 +347,16 @@ describe("parseCouncilConfig", () => {
     expect(config.quorum).toBe(count);
   });
 
+  it("defaults quorum to the required model count on mixed councils", () => {
+    const config = parseCouncilConfig({
+      council: validCouncil({
+        models: [MODEL_A, MODEL_B, { providerID: "provider-c", modelID: "model-c", optional: true }],
+      }),
+    });
+
+    expect(config.quorum).toBe(2);
+  });
+
   it("accepts explicit quorum values between 2 and the model count", () => {
     expect(
       parseCouncilConfig({ council: validCouncil({ models: models(5), quorum: 2 }) }).quorum,
@@ -309,7 +367,7 @@ describe("parseCouncilConfig", () => {
   });
 
   it.each([1, 4, 2.5, "3", -1])(
-    "warns and falls back to the model count for invalid quorum %s",
+    "warns and falls back to the required model count for invalid quorum %s",
     (quorum) => {
       const warn = vi.fn();
 
@@ -320,10 +378,174 @@ describe("parseCouncilConfig", () => {
 
       expect(config.quorum).toBe(3);
       expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("Invalid council.quorum"),
+        expect.stringContaining("Must be integer in [2, 3]. Falling back to 3."),
       );
     },
   );
+
+  it("warns and falls back when quorum exceeds required model count", () => {
+    const warn = vi.fn();
+
+    const config = parseCouncilConfig(
+      {
+        council: validCouncil({
+          models: [MODEL_A, MODEL_B, { providerID: "provider-c", modelID: "model-c", optional: true }],
+          quorum: 3,
+        }),
+      },
+      warn,
+    );
+
+    expect(config.quorum).toBe(2);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Must be integer in [2, 2]. Falling back to 2."),
+    );
+  });
+
+  it("migrates all-model quorum to required-count quorum when optionals are introduced", () => {
+    const warn = vi.fn();
+
+    const config = parseCouncilConfig(
+      {
+        council: validCouncil({
+          models: [
+            MODEL_A,
+            MODEL_B,
+            { providerID: "provider-c", modelID: "model-c", optional: true },
+            { providerID: "provider-d", modelID: "model-d", optional: true },
+            { providerID: "provider-e", modelID: "model-e", optional: true },
+          ],
+          quorum: 5,
+        }),
+      },
+      warn,
+    );
+
+    expect(config.quorum).toBe(2);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Must be integer in [2, 2]. Falling back to 2."),
+    );
+  });
+
+  it.each([
+    ["wrapped", (overrides: Record<string, unknown>) => ({ council: validCouncil(overrides) })],
+    ["direct", (overrides: Record<string, unknown>) => validCouncil(overrides)],
+  ])("normalizes aggregator_model optional warnings for %s options", (_shape, buildOptions) => {
+    const cases = [
+      ["aggregator_model absent", {}, null, 0],
+      [
+        "optional absent",
+        { aggregator_model: { providerID: "provider-c", modelID: "model-c" } },
+        { providerID: "provider-c", modelID: "model-c" },
+        0,
+      ],
+      [
+        "optional present undefined",
+        { aggregator_model: { providerID: "provider-c", modelID: "model-c", optional: undefined } },
+        { providerID: "provider-c", modelID: "model-c" },
+        0,
+      ],
+      [
+        "optional false",
+        { aggregator_model: { providerID: "provider-c", modelID: "model-c", optional: false } },
+        { providerID: "provider-c", modelID: "model-c" },
+        0,
+      ],
+      [
+        "optional true",
+        { aggregator_model: { providerID: "provider-c", modelID: "model-c", optional: true } },
+        { providerID: "provider-c", modelID: "model-c" },
+        1,
+      ],
+      [
+        "optional non-boolean",
+        { aggregator_model: { providerID: "provider-c", modelID: "model-c", optional: "yes" } },
+        { providerID: "provider-c", modelID: "model-c" },
+        1,
+      ],
+      ["invalid aggregator_model", { aggregator_model: { providerID: "", modelID: "bad" } }, null, 0],
+    ] as const;
+
+    for (const [label, overrides, expectedAggregatorModel, expectedWarnCount] of cases) {
+      const warn = vi.fn();
+
+      const config = parseCouncilConfig(buildOptions(overrides), warn);
+
+      expect(config.aggregator_model, label).toEqual(expectedAggregatorModel);
+      expect(warn, label).toHaveBeenCalledTimes(expectedWarnCount);
+      expect(
+        warn.mock.calls.some(([message]) =>
+          String(message).includes("council.models optional flag must be boolean"),
+        ),
+        label,
+      ).toBe(false);
+      if (expectedWarnCount === 1) {
+        expect(warn, label).toHaveBeenCalledWith(
+          "council.aggregator_model cannot be optional; ignoring optional flag",
+          expect.objectContaining({ providerID: "provider-c", modelID: "model-c" }),
+        );
+      }
+    }
+  });
+
+  it("parses optional_councillor_ms defaults, explicit values, clamps, and invalid values", () => {
+    expect(parseCouncilConfig({ council: validCouncil() }).timeouts.optional_councillor_ms).toBe(
+      OPTIONAL_COUNCILLOR_TIMEOUT_MS,
+    );
+
+    expect(
+      parseCouncilConfig({
+        council: validCouncil({ timeouts: { optional_councillor_ms: 45_000 } }),
+      }).timeouts.optional_councillor_ms,
+    ).toBe(45_000);
+
+    const clampWarn = vi.fn();
+    expect(
+      parseCouncilConfig(
+        { council: validCouncil({ timeouts: { councillor_ms: 30_000, optional_councillor_ms: 45_000 } }) },
+        clampWarn,
+      ).timeouts.optional_councillor_ms,
+    ).toBe(30_000);
+    expect(clampWarn).toHaveBeenCalledWith(
+      expect.stringContaining("optional_councillor_ms cannot exceed councillor_ms; clamping"),
+      expect.objectContaining({ optional_councillor_ms: 45_000, councillor_ms: 30_000 }),
+    );
+
+    for (const invalid of [-1, "60s", undefined, 0]) {
+      const warn = vi.fn();
+      const config = parseCouncilConfig(
+        { council: validCouncil({ timeouts: { optional_councillor_ms: invalid } }) },
+        warn,
+      );
+
+      expect(config.timeouts.optional_councillor_ms).toBe(OPTIONAL_COUNCILLOR_TIMEOUT_MS);
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("optional_councillor_ms cannot exceed councillor_ms; clamping"),
+        expect.anything(),
+      );
+    }
+
+    const silentClampWarn = vi.fn();
+    expect(
+      parseCouncilConfig(
+        { council: validCouncil({ timeouts: { councillor_ms: 30_000 } }) },
+        silentClampWarn,
+      ).timeouts.optional_councillor_ms,
+    ).toBe(30_000);
+    expect(silentClampWarn).not.toHaveBeenCalledWith(
+      expect.stringContaining("optional_councillor_ms cannot exceed councillor_ms; clamping"),
+      expect.anything(),
+    );
+
+    const boundaryWarn = vi.fn();
+    expect(
+      parseCouncilConfig(
+        { council: validCouncil({ timeouts: { councillor_ms: 30_000, optional_councillor_ms: 30_000 } }) },
+        boundaryWarn,
+      ).timeouts.optional_councillor_ms,
+    ).toBe(30_000);
+    expect(boundaryWarn).not.toHaveBeenCalled();
+  });
 
   it("defaults quorum_grace_ms to 0", () => {
     expect(parseCouncilConfig({ council: validCouncil() }).timeouts.quorum_grace_ms).toBe(0);

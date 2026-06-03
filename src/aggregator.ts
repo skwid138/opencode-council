@@ -11,6 +11,8 @@ import type {
   ReviewState,
 } from "./types";
 
+const AGGREGATOR_LABEL_OPTIONS = { includeOptionalMarker: true };
+
 export const AGGREGATOR_TOOLS = {
   "chrome-devtools": false,
   context7: false,
@@ -42,7 +44,7 @@ export function buildAggregatorPrompt(input: {
 }): string {
   const successfulResponses = input.successes
     .map(
-      (success, index) => `## Reviewer ${index + 1}: ${modelLabel(success.model)}
+      (success, index) => `## Reviewer ${index + 1}: ${modelLabel(success.model, AGGREGATOR_LABEL_OPTIONS)}
 
 ${success.response}`,
     )
@@ -53,7 +55,7 @@ ${success.response}`,
       ? input.failures
           .map(
             (failure) =>
-              `- ${modelLabel(failure.model)}: ${failure.error || "failed"}`,
+              `- ${modelLabel(failure.model, AGGREGATOR_LABEL_OPTIONS)}: ${failure.error || "failed"}`,
           )
           .join("\n")
       : "- none";
@@ -63,7 +65,7 @@ ${success.response}`,
       ? `
 
 Aborted (quorum reached):
-${formatAbortedSummary(input.aborted)}`
+${formatAbortedSummary(input.aborted, AGGREGATOR_LABEL_OPTIONS)}`
       : "";
 
   const abortedSection =
@@ -72,7 +74,7 @@ ${formatAbortedSummary(input.aborted)}`
 
 ## Aborted (quorum reached)
 
-${formatAbortedSummary(input.aborted)}`
+${formatAbortedSummary(input.aborted, AGGREGATOR_LABEL_OPTIONS)}`
       : "";
 
   return `You are aggregating multiple reviewer responses to one review prompt.
@@ -86,7 +88,7 @@ ${input.originalPrompt}
 # Participation summary supplied by council_review
 
 Responded:
-${input.successes.map((success) => `- ${modelLabel(success.model)}`).join("\n")}
+${input.successes.map((success) => `- ${modelLabel(success.model, AGGREGATOR_LABEL_OPTIONS)}`).join("\n")}
 
 Failed or timed out:
 ${failures}${abortedParticipation}
@@ -96,16 +98,22 @@ ${failures}${abortedParticipation}
 ${successfulResponses}${abortedSection}`;
 }
 
-export function formatFailureSummary(failures: CouncillorFailure[]): string {
+export function formatFailureSummary(
+  failures: CouncillorFailure[],
+  labelOptions: { includeOptionalMarker?: boolean } = {},
+): string {
   if (failures.length === 0) return "none";
   return failures
-    .map((failure) => `- ${modelLabel(failure.model)}: ${failure.error}`)
+    .map((failure) => `- ${modelLabel(failure.model, labelOptions)}: ${failure.error}`)
     .join("\n");
 }
 
-export function formatAbortedSummary(aborted: CouncillorAborted[]): string {
+export function formatAbortedSummary(
+  aborted: CouncillorAborted[],
+  labelOptions: { includeOptionalMarker?: boolean } = {},
+): string {
   if (aborted.length === 0) return "none";
-  return aborted.map((entry) => `- ${modelLabel(entry.model)}`).join("\n");
+  return aborted.map((entry) => `- ${modelLabel(entry.model, labelOptions)}`).join("\n");
 }
 
 export async function synthesizeWithAggregator(

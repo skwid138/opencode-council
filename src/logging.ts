@@ -10,8 +10,12 @@ export type Logger = (
   extra?: Record<string, unknown>,
 ) => void;
 
-export function modelLabel(model: ModelConfig): string {
-  return `${model.providerID}/${model.modelID}`;
+export function modelLabel(
+  model: ModelConfig,
+  options: { includeOptionalMarker?: boolean } = {},
+): string {
+  const label = `${model.providerID}/${model.modelID}`;
+  return options.includeOptionalMarker && model.optional ? `${label} (optional)` : label;
 }
 
 export function errorMessage(error: unknown): string {
