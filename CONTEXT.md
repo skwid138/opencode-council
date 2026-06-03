@@ -25,8 +25,20 @@ The pattern of injecting agent definitions at plugin startup via the opencode co
 _Avoid_: Dynamic registration, runtime injection
 
 **Models array**:
-The list of `{ providerID, modelID }` pairs that councillors fan out to. Each model in the array spawns one councillor.
+The list of `{ providerID, modelID, optional? }` entries that councillors fan out to. Each model in the array spawns one councillor.
 _Avoid_: Reviewer models, councillor models
+
+**Required councillor**:
+A councillor whose model entry omits `optional` or sets `optional: false`. Required councillors count toward **quorum** and use `timeouts.councillor_ms`.
+_Avoid_: mandatory reviewer, normal reviewer
+
+**Optional councillor**:
+A councillor whose model entry sets `optional: true`. Optional councillors can enrich the aggregator if they finish, but do not count toward **quorum**; the aggregator prompt marks optional councillors with `(optional)` across success headings, Responded lists, Failed/timed-out lists, Aborted footers, and Aborted sections.
+_Avoid_: bonus reviewer, best-effort reviewer
+
+**Optional councillor timeout**:
+The shorter timeout budget for optional councillors, configured via `council.timeouts.optional_councillor_ms` and clamped to `councillor_ms` when necessary. Required councillors never use this timeout.
+_Avoid_: optional retry timeout, straggler timeout
 
 **Permission override**:
 User-specified permissions (`reviewer_permission`, `aggregator_permission`) that layer on top of the active agent's permissions, whether bundled or user-specified. Applied as the highest-priority rules in last-match-wins evaluation.
@@ -57,10 +69,10 @@ Child-session permission rulesets are constructed in append order. OpenCode eval
 Workspace permission config captured from the config hook at plugin startup. The config hook is guaranteed to run before any tool execution, so this value is always populated when `buildReviewerRuleset` is called. OpenCode does not hot-reload config; the value remains valid for the plugin's lifetime.
 
 **Active session tracking**:
-A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by the hard-cap timeout to abort all in-flight sessions, and by the quorum-abort sweep to terminate still-pending councillors once `quorum` successes have been reached. Abort calls are fire-and-forget and idempotent — double-aborts are tolerated.
+A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by the hard-cap timeout to abort all in-flight sessions, and by the quorum-abort sweep to terminate still-pending councillors once `quorum` required successes have been reached. Abort calls are fire-and-forget and idempotent — double-aborts are tolerated.
 
 **Quorum**:
-The number of successful councillor responses required before the aggregator can run. Configured via `council.quorum`; valid range is `[2, models.length]`. Default is `models.length` (wait-for-all). When `quorum < models.length`, the orchestrator stops waiting on stragglers once quorum is reached.
+The number of successful **required councillor** responses required before the aggregator can run early. Configured via `council.quorum`; valid range is `[2, requiredCount]`, where `requiredCount` excludes optional councillors. Default is `requiredCount` (wait-for-all-required). Optional councillor successes do not increment quorum, but they still count toward the tier-blind two-success floor for aggregator fallback behavior.
 _Avoid_: threshold, minimum, majority
 
 **Quorum grace window**:
@@ -82,7 +94,7 @@ _Avoid_: cancelled councillor, timed-out councillor, failed councillor
 - The **aggregator agent** receives all councillor responses and produces deduplicated findings.
 - **Permission overrides** layer on top of the active agent's permissions (bundled or user-specified) as the highest-priority rules.
 - The **hard cap** wraps the entire operation as a safety net; **phase timeouts** govern individual phases independently with fresh clocks.
-- When **quorum** is reached before all councillors respond, the orchestrator optionally waits up to the **quorum grace window**, then runs the **laggard abort sweep** to terminate still-pending councillor sessions. Each terminated session becomes an **aborted councillor** in the aggregator's participation summary.
+- When **quorum** is reached by required councillors before all councillors respond, the orchestrator optionally waits up to the **quorum grace window**, then runs the **laggard abort sweep** to terminate still-pending councillor sessions. Each terminated session becomes an **aborted councillor** in the aggregator's participation summary.
 
 ## Example dialogue
 
@@ -92,8 +104,8 @@ _Avoid_: cancelled councillor, timed-out councillor, failed councillor
 > **Dev:** "Can I use `reviewer_permission` to add permissions to my custom saruman agent?"
 > **Domain expert:** "Yes — `reviewer_permission` layers on top of saruman's own permissions as highest-priority rules. This lets you tighten or loosen permissions for the council context without editing the agent definition."
 
-> **Dev:** "If I set `quorum: 3` with 5 models, will the aggregator always get exactly 3 responses?"
-> **Domain expert:** "Not necessarily. It gets at least 3 (the quorum threshold). If `quorum_grace_ms > 0`, stragglers that complete during the grace window are also included. The default is `quorum = models.length` which preserves wait-for-all behavior — early aggregation is opt-in."
+> **Dev:** "If I set `quorum: 3` with 5 required models, will the aggregator always get exactly 3 responses?"
+> **Domain expert:** "Not necessarily. It gets at least 3 required successes (the quorum threshold). If `quorum_grace_ms > 0`, stragglers that complete during the grace window are also included. Optional councillors may also appear if they finish before the laggard abort sweep. The default is `quorum = requiredCount`, which preserves wait-for-all-required behavior — early aggregation is opt-in."
 
 ## Flagged ambiguities
 

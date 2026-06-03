@@ -39,7 +39,7 @@ Requires `@opencode-ai/plugin ^1.15.0` as a peer dependency.
 
 ## Configuration
 
-Add the plugin to your `opencode.json`. The only required council option is a `models` array with at least two entries; the plugin injects bundled reviewer and aggregator agents automatically when you do not specify your own.
+Add the plugin to your `opencode.json`. The only required council option is a `models` array with at least two required (non-optional) entries; the plugin injects bundled reviewer and aggregator agents automatically when you do not specify your own.
 
 Minimal config:
 
@@ -73,7 +73,7 @@ Full config with all options:
           "models": [
             { "providerID": "openai", "modelID": "gpt-5.5" },
             { "providerID": "github-copilot", "modelID": "claude-opus-4.6" },
-            { "providerID": "google", "modelID": "gemini-3-pro" }
+            { "providerID": "google", "modelID": "gemini-3-pro", "optional": true }
           ],
           "quorum": 2,
           "reviewer": "my-reviewer",
@@ -95,6 +95,7 @@ Full config with all options:
           "aggregator_model": { "providerID": "openai", "modelID": "gpt-5.5" },
           "timeouts": {
             "councillor_ms": 270000,
+            "optional_councillor_ms": 60000,
             "aggregator_ms": 120000,
             "quorum_grace_ms": 10000,
             "hard_cap_ms": 430000
@@ -112,7 +113,7 @@ Note: `reviewer_temperature` is shown for option reference; it only affects the 
 
 | Field | Description |
 |-------|-------------|
-| `council.models` | Array of 2+ model configs (`providerID` + `modelID`) to fan out to |
+| `council.models` | Array of model configs (`providerID` + `modelID`) with 2+ required (non-optional) entries to fan out to |
 
 ### Optional fields
 
@@ -125,19 +126,22 @@ Note: `reviewer_temperature` is shown for option reference; it only affects the 
 | `council.reviewer_permission` | Catch-all `bash`/`external_directory` allows plus workspace inherited rules | Extra session-level reviewer rules. Values may be flat (`"bash": "deny"`) or nested pattern maps (`"bash": { "sudo *": "deny" }`). Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_permission` | none | Optional session-level aggregator rules. No workspace inheritance or catch-all allows are applied to the aggregator. Use only `allow` or `deny`; `ask` entries are stripped. |
 | `council.aggregator_model` | First available model | Specific model for the aggregator agent |
-| `council.quorum` | `models.length` | Number of successful councillor responses required before the aggregator can run. When `quorum < models.length`, the aggregator starts as soon as quorum is reached and pending councillors are aborted (after an optional grace window). Must be an integer in `[2, models.length]`. Default preserves wait-for-all behavior. |
+| `council.models[].optional` | `false` | Marks a councillor as optional. Optional councillors can enrich aggregation if they finish, but do not count toward required councillor quorum. |
+| `council.quorum` | required councillor count | Number of successful required (non-optional) councillor responses required before the aggregator can run. When `quorum < requiredCount`, the aggregator starts as soon as required quorum is reached and pending councillors are aborted (after an optional grace window). Must be an integer in `[2, requiredCount]`. Default preserves wait-for-all-required behavior. |
 | `council.timeouts.councillor_ms` | `270000` (4.5 min) | Timeout for each reviewer request |
+| `council.timeouts.optional_councillor_ms` | `60000` (1 min) | Timeout for optional councillor requests. Values above `councillor_ms` are clamped to `councillor_ms`. |
 | `council.timeouts.aggregator_ms` | `120000` (2 min) | Timeout for the aggregation step. This starts after the councillor phase completes, so the aggregator gets a fresh clock. |
 | `council.timeouts.quorum_grace_ms` | `0` | Optional grace window in milliseconds after quorum is reached, during which stragglers can still join before the laggard abort sweep. Set to `0` (default) to abort pending councillors immediately on quorum. |
 | `council.timeouts.hard_cap_ms` | computed (`420000` with defaults) | Absolute maximum wall time for the entire operation. By default this is `councillor_ms + aggregator_ms + quorum_grace_ms + 30000`. |
 
 ### Timeout behavior
 
-Council review uses three timeout layers:
+Council review uses four timeout layers:
 
 1. Each councillor request gets `councillor_ms`.
-2. The aggregator gets a fresh `aggregator_ms` clock after the councillor phase completes.
-3. When `quorum < models.length`, an optional layer kicks in: once `quorum` councillors succeed, the orchestrator waits up to `quorum_grace_ms` for stragglers to join, then aborts any still-pending councillor sessions before invoking the aggregator.
+2. Optional councillor requests race a shorter `optional_councillor_ms` budget (clamped to `councillor_ms`).
+3. The aggregator gets a fresh `aggregator_ms` clock after the councillor phase completes.
+4. When `quorum < requiredCount`, an optional layer kicks in: once `quorum` required councillors succeed, the orchestrator waits up to `quorum_grace_ms` for stragglers to join, then aborts any still-pending councillor sessions before invoking the aggregator.
 
 The outer `hard_cap_ms` is a safety net around the whole operation. When omitted, it is computed from the resolved phase timeouts plus a 30-second buffer: `councillor_ms + aggregator_ms + quorum_grace_ms + 30000`. With defaults (grace = 0), that is `270000 + 120000 + 0 + 30000 = 420000` (7 minutes).
 
@@ -204,9 +208,9 @@ For working examples of reviewer and aggregator agent definitions, see:
 ## How it works
 
 1. **Fan out** — The review prompt is sent to each configured model in parallel, each running as the specified `reviewer` agent in its own child session.
-2. **Quorum** — As soon as `quorum` reviewers respond successfully (default: all of them), the orchestrator stops waiting on the rest. If `quorum_grace_ms > 0`, a grace window lets stragglers join before pending sessions are aborted.
+2. **Quorum** — As soon as `quorum` required reviewers respond successfully (default: all required councillors), the orchestrator stops waiting on the rest. If `quorum_grace_ms > 0`, a grace window lets stragglers join before pending sessions are aborted. Optional councillors do not count toward quorum and are aborted by the laggard sweep when required quorum is met.
 3. **Gate** — At least 2 successful responses are required overall. Otherwise, an error is returned for fallback handling.
-4. **Aggregate** — Successful responses are passed to the `aggregator` agent, which performs structural synthesis without issuing its own verdict. The aggregator prompt is byte-identical to the pre-quorum behavior when no councillors were aborted.
+4. **Aggregate** — Successful responses are passed to the `aggregator` agent, which performs structural synthesis without issuing its own verdict. The aggregator prompt is byte-identical to the pre-quorum behavior when no councillors were aborted and all councillors are required; mixed councils tag optional councillors with `(optional)`.
 5. **Return** — The aggregated result is returned to the calling agent.
 
 ## Source structure
@@ -235,7 +239,7 @@ The plugin registers a single tool:
 |-----------|------|-------------|
 | `prompt` | `string` | The complete review prompt to send to each reviewer |
 
-**Returns:** The aggregator's structural synthesis, or an error string if fewer than 2 reviewers succeeded (timeouts, failures, or quorum-aborts all count against the success threshold).
+**Returns:** The aggregator's structural synthesis, or an error string if fewer than 2 reviewers succeeded (timeouts and failures count against the success threshold; quorum-aborts happen only after required quorum is reached).
 
 ## Example output
 
