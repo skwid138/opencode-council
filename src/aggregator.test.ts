@@ -9,6 +9,7 @@ import {
 } from "./aggregator";
 import { modelLabel } from "./logging";
 import type { CouncilConfig, CouncillorSuccess, ReviewState } from "./types";
+import { createV1Host } from "./v1";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
@@ -243,7 +244,7 @@ describe("synthesizeWithAggregator", () => {
     };
 
     await expect(
-      synthesizeWithAggregator(createContext(session) as never, councilConfig(), vi.fn(), {
+      synthesizeWithAggregator(createV1Host(createContext(session) as never), councilConfig(), vi.fn(), {
         parentSessionID: "parent",
         originalPrompt: "review this",
         successes: [
@@ -287,7 +288,7 @@ describe("synthesizeWithAggregator", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
 
     await synthesizeWithAggregator(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({ aggregator_model: aggregatorModel }),
       vi.fn(),
       {
@@ -321,7 +322,7 @@ describe("synthesizeWithAggregator", () => {
 
     await expect(
       synthesizeWithAggregator(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({ timeouts: { ...councilConfig().timeouts, aggregator_ms: 50 } }),
         log,
         {
@@ -348,5 +349,45 @@ describe("synthesizeWithAggregator", () => {
     await eventually(() => {
       expect(session.abort).toHaveBeenCalledWith({ path: { id: "aggregator-session" } });
     });
+  });
+});
+
+describe("late child after the aggregator phase timeout", () => {
+  it("never prompts an aggregator child whose create resolves after the timeout, and requests its stop", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createSessionMocks();
+      const lateCreate = deferred<{ data: { id: string } }>();
+      session.create.mockReturnValueOnce(lateCreate.promise);
+      session.prompt.mockResolvedValue({});
+      session.messages.mockResolvedValue({ data: assistantMessages("late aggregate") });
+      session.abort.mockImplementation(() => new Promise(() => {}));
+
+      const result = synthesizeWithAggregator(
+        createV1Host(createContext(session) as never),
+        councilConfig({ timeouts: { ...councilConfig().timeouts, aggregator_ms: 50 } }),
+        vi.fn(),
+        {
+          parentSessionID: "parent",
+          originalPrompt: "review this",
+          successes: [success(MODEL_A, "response a"), success(MODEL_B, "response b")],
+          failures: [],
+          aborted: [],
+          directory: "/dir",
+          reviewState: { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false },
+        },
+      );
+      const observed = result.catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await observed).toMatchObject({ message: "aggregator synthesis timed out after 0s" });
+
+      lateCreate.resolve({ data: { id: "late-aggregator" } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.prompt).not.toHaveBeenCalled();
+      expect(session.abort).toHaveBeenCalledWith({ path: { id: "late-aggregator" } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

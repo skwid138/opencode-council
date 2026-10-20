@@ -1,17 +1,17 @@
-import { errorMessage, type Logger, modelLabel } from "./logging";
-import { createChildSession, promptAndExtract } from "./session";
-import { raceWithTimeout } from "./timeout";
+import { awaitStop, raceCancellation } from "./cancellation.js";
+import type { ChildPermission, CouncilHost } from "./host.js";
+import { errorMessage, type Logger, modelLabel } from "./logging.js";
+import { type AttemptState, createChildSession, promptAndExtract } from "./session.js";
+import { raceWithTimeout } from "./timeout.js";
 import type {
   CouncilConfig,
-  CouncilPluginContext,
   CouncillorSuccess,
   ModelConfig,
-  PermissionRuleset,
   ReviewState,
-} from "./types";
+} from "./types.js";
 
 export async function runCouncillorAttempt(
-  ctx: CouncilPluginContext,
+  host: CouncilHost,
   councilConfig: CouncilConfig,
   log: Logger,
   input: {
@@ -20,13 +20,14 @@ export async function runCouncillorAttempt(
     model: ModelConfig;
     timeoutMs: number;
     directory: string;
-    reviewerPermission: PermissionRuleset;
+    reviewerPermission: ChildPermission;
     reviewState: ReviewState;
   },
 ): Promise<string> {
   const label = modelLabel(input.model);
   const startedAt = Date.now();
   let sessionID: string | undefined;
+  const attempt: AttemptState = { expired: false };
   log("debug", "councillor request started", {
     model: label,
     timeout_ms: input.timeoutMs,
@@ -37,44 +38,53 @@ export async function runCouncillorAttempt(
       (async () => {
         try {
           sessionID = await createChildSession(
-            ctx,
+            host,
             input.parentSessionID,
             `council: ${label}`,
             input.directory,
             [...input.reviewerPermission],
             input.reviewState,
             true,
+            { agent: councilConfig.reviewer, model: input.model },
+            attempt,
           );
 
-          return await promptAndExtract(ctx, {
-            sessionID,
-            agent: councilConfig.reviewer,
-            model: input.model,
-            prompt: input.prompt,
-          });
+          return await raceCancellation(
+            promptAndExtract(host, {
+              sessionID,
+              agent: councilConfig.reviewer,
+              model: input.model,
+              prompt: input.prompt,
+              isCancelled: () => input.reviewState.cancellation?.cancelled === true,
+            }),
+            input.reviewState.cancellation,
+          );
         } finally {
-          // Timeout can fire before session.create returns an id; in that race
-          // the timeout cleanup has nothing to abort, so this finally aborts
-          // the session if the create later resolves.
+          // Normal completion or failure after create: stop the child. A child
+          // whose create resolves after the phase timeout never reaches here
+          // with an id: createChildSession sees the expired attempt, stops it
+          // (detached), and throws before any prompt.
           if (sessionID) {
             input.reviewState.activeSessions.delete(sessionID);
-            await ctx.client.session
-              .abort({ path: { id: sessionID } })
-              .catch(() => {});
+            // After cancellation the sweep already stopped this child (it was
+            // still tracked as active); do not stop it twice.
+            if (!input.reviewState.cancellation?.cancelled) {
+              // awaited (see host.ts table)
+              await awaitStop(host.stopChild(sessionID), input.reviewState.cancellation);
+            }
           }
         }
       })(),
       input.timeoutMs,
       label,
       () => {
+        attempt.expired = true;
         log("debug", "councillor request timed out", {
           model: label,
           timeout_ms: input.timeoutMs,
         });
         if (sessionID) {
-          void ctx.client.session
-            .abort({ path: { id: sessionID } })
-            .catch(() => {});
+          void host.stopChild(sessionID); // detached (see host.ts table)
         }
       },
     );
@@ -97,7 +107,7 @@ export async function runCouncillorAttempt(
 }
 
 export async function runCouncillor(
-  ctx: CouncilPluginContext,
+  host: CouncilHost,
   councilConfig: CouncilConfig,
   log: Logger,
   input: {
@@ -105,14 +115,14 @@ export async function runCouncillor(
     prompt: string;
     model: ModelConfig;
     directory: string;
-    reviewerPermission: PermissionRuleset;
+    reviewerPermission: ChildPermission;
     reviewState: ReviewState;
   },
 ): Promise<CouncillorSuccess> {
   const timeoutMs = input.model.optional
     ? councilConfig.timeouts.optional_councillor_ms
     : councilConfig.timeouts.councillor_ms;
-  const response = await runCouncillorAttempt(ctx, councilConfig, log, {
+  const response = await runCouncillorAttempt(host, councilConfig, log, {
     ...input,
     timeoutMs,
   });

@@ -144,3 +144,14 @@ export const REVIEWER_PERMISSION = {
 export const AGGREGATOR_PERMISSION = {
   "*": "deny",
 } as const;
+
+/** `council_review` tool description, shared by every host adapter. */
+export const COUNCIL_REVIEW_DESCRIPTION = `Fan out a review prompt to the configured council of reviewers in parallel, then ask an aggregator to structurally aggregate the responses.
+
+Use when you need adversarial review from multiple models. The tool returns the aggregator's synthesis when at least two councillors respond. If fewer than two respond, it returns an error string so the caller can fall back to a single reviewer.`;
+
+export const COUNCIL_REVIEW_PROMPT_ARG_DESCRIPTION =
+  "The complete review prompt to send to each councillor";
+
+export const BUNDLED_REVIEWER_DESCRIPTION = "Council plugin adversarial code reviewer";
+export const BUNDLED_AGGREGATOR_DESCRIPTION = "Council plugin structural aggregator";

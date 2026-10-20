@@ -1,15 +1,15 @@
-import { errorMessage, type Logger, modelLabel } from "./logging";
-import { createChildSession, promptAndExtract } from "./session";
-import { raceWithTimeout } from "./timeout";
+import { awaitStop, raceCancellation } from "./cancellation.js";
+import type { ChildPermission, CouncilHost } from "./host.js";
+import { errorMessage, type Logger, modelLabel } from "./logging.js";
+import { type AttemptState, createChildSession, promptAndExtract } from "./session.js";
+import { raceWithTimeout } from "./timeout.js";
 import type {
   CouncilConfig,
-  CouncilPluginContext,
   CouncillorAborted,
   CouncillorFailure,
   CouncillorSuccess,
-  PermissionRuleset,
   ReviewState,
-} from "./types";
+} from "./types.js";
 
 const AGGREGATOR_LABEL_OPTIONS = { includeOptionalMarker: true };
 
@@ -117,7 +117,7 @@ export function formatAbortedSummary(
 }
 
 export async function synthesizeWithAggregator(
-  ctx: CouncilPluginContext,
+  host: CouncilHost,
   councilConfig: CouncilConfig,
   log: Logger,
   input: {
@@ -128,11 +128,12 @@ export async function synthesizeWithAggregator(
     aborted: CouncillorAborted[];
     directory: string;
     reviewState: ReviewState;
-    aggregatorPermission?: PermissionRuleset;
+    aggregatorPermission?: ChildPermission;
   },
 ): Promise<string> {
   const startedAt = Date.now();
   let sessionID: string | undefined;
+  const attempt: AttemptState = { expired: false };
   log("debug", "aggregator synthesis started", {
     model: councilConfig.aggregator_model
       ? modelLabel(councilConfig.aggregator_model)
@@ -147,43 +148,56 @@ export async function synthesizeWithAggregator(
       (async () => {
         try {
           sessionID = await createChildSession(
-            ctx,
+            host,
             input.parentSessionID,
             "council: aggregator synthesis",
             input.directory,
             input.aggregatorPermission,
             input.reviewState,
+            false,
+            {
+              agent: councilConfig.aggregator,
+              ...(councilConfig.aggregator_model ? { model: councilConfig.aggregator_model } : {}),
+            },
+            attempt,
           );
 
-          return await promptAndExtract(ctx, {
-            sessionID,
-            agent: councilConfig.aggregator,
-            model: councilConfig.aggregator_model ?? undefined,
-            tools: AGGREGATOR_TOOLS,
-            prompt: buildAggregatorPrompt(input),
-          });
+          return await raceCancellation(
+            promptAndExtract(host, {
+              sessionID,
+              agent: councilConfig.aggregator,
+              model: councilConfig.aggregator_model ?? undefined,
+              tools: AGGREGATOR_TOOLS,
+              prompt: buildAggregatorPrompt(input),
+              isCancelled: () => input.reviewState.cancellation?.cancelled === true,
+            }),
+            input.reviewState.cancellation,
+          );
         } finally {
-          // Timeout can fire before session.create returns an id; in that race
-          // the timeout cleanup has nothing to abort, so this finally aborts
-          // the session if the create later resolves.
+          // Normal completion or failure after create: stop the child. A child
+          // whose create resolves after the phase timeout never reaches here
+          // with an id: createChildSession sees the expired attempt, stops it
+          // (detached), and throws before any prompt.
           if (sessionID) {
             input.reviewState.activeSessions.delete(sessionID);
-            await ctx.client.session
-              .abort({ path: { id: sessionID } })
-              .catch(() => {});
+            // After cancellation the sweep already stopped this child (it was
+            // still tracked as active); do not stop it twice.
+            if (!input.reviewState.cancellation?.cancelled) {
+              // awaited (see host.ts table)
+              await awaitStop(host.stopChild(sessionID), input.reviewState.cancellation);
+            }
           }
         }
       })(),
       councilConfig.timeouts.aggregator_ms,
       "aggregator synthesis",
       () => {
+        attempt.expired = true;
         log("debug", "aggregator synthesis timed out", {
           timeout_ms: councilConfig.timeouts.aggregator_ms,
         });
         if (sessionID) {
-          void ctx.client.session
-            .abort({ path: { id: sessionID } })
-            .catch(() => {});
+          void host.stopChild(sessionID); // detached (see host.ts table)
         }
       },
     );

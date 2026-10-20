@@ -22,7 +22,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "vitest run",
+    "test": "node test/run-isolated.mjs vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify:pack": "node test/run-isolated.mjs node test/verify-pack.mjs",
+    "verify:consumer": "node test/run-isolated.mjs node test/verify-pack.mjs --consumer-types",
+    "test:real-host": "node test/real-host/run.mjs",
     "prepublishOnly": "npm run build",
     "prepare": "husky || true"
   },
@@ -34,6 +38,7 @@
     "@commitlint/config-conventional": "^21.0.2",
     "@opencode-ai/plugin": "^1.15.0",
     "@opencode-ai/sdk": "^1.15.0",
+    "@opencode/plugin": "2.0.32",
     "@types/node": "^22.0.0",
     "husky": "^9.1.7",
     "semantic-release": "^25.0.0",

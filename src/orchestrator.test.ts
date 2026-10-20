@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runCouncilReview } from "./orchestrator";
 import type { CouncilConfig } from "./types";
+import { createV1Host } from "./v1";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
@@ -103,7 +104,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig(),
         vi.fn(),
         undefined,
@@ -137,7 +138,7 @@ describe("runCouncilReview", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("one response") });
 
     const result = await runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig(),
       vi.fn(),
       undefined,
@@ -166,7 +167,7 @@ describe("runCouncilReview", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("one response") });
 
     const result = await runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({ models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }], quorum: 2 }),
       vi.fn(),
       undefined,
@@ -195,7 +196,7 @@ describe("runCouncilReview", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("optional response") });
 
     const result = await runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }, optionalD],
         quorum: 2,
@@ -223,7 +224,7 @@ describe("runCouncilReview", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response a") });
 
     await runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({ reviewer_permission: { bash: "deny" } }),
       vi.fn(),
       { bash: { "git *": "allow", "sudo *": "deny" } },
@@ -238,6 +239,7 @@ describe("runCouncilReview", () => {
         { permission: "bash", pattern: "git *", action: "allow" },
         { permission: "bash", pattern: "sudo *", action: "deny" },
         { permission: "bash", pattern: "*", action: "deny" },
+        { permission: "council_review", pattern: "*", action: "deny" },
       ]);
   });
 
@@ -254,7 +256,7 @@ describe("runCouncilReview", () => {
       .mockResolvedValueOnce({ data: assistantMessages("aggregated response") });
 
     await runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({ aggregator_permission: { bash: "deny" } }),
       vi.fn(),
       undefined,
@@ -278,7 +280,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({ timeouts: { ...councilConfig().timeouts, hard_cap_ms: 50 } }),
         log,
         undefined,
@@ -309,7 +311,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig(),
         vi.fn(),
         undefined,
@@ -343,7 +345,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({
           models: [MODEL_A, MODEL_B, MODEL_C],
           quorum: 2,
@@ -382,7 +384,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
         quorum: 2,
@@ -430,7 +432,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
         quorum: 2,
@@ -465,7 +467,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig(),
         vi.fn(),
         undefined,
@@ -497,7 +499,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({ models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }], quorum: 2 }),
         vi.fn(),
         undefined,
@@ -532,7 +534,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({
           models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }, optionalD],
           quorum: 2,
@@ -573,7 +575,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, MODEL_C],
         quorum: 2,
@@ -619,7 +621,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
         quorum: 2,
@@ -664,7 +666,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }],
         quorum: 2,
@@ -706,7 +708,7 @@ describe("runCouncilReview", () => {
 
     await expect(
       runCouncilReview(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({ models: [MODEL_A, MODEL_B, { ...MODEL_C, optional: true }], quorum: 2 }),
         vi.fn(),
         undefined,
@@ -748,7 +750,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, MODEL_C],
         quorum: 2,
@@ -795,7 +797,7 @@ describe("runCouncilReview", () => {
     });
 
     const result = runCouncilReview(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig({
         models: [MODEL_A, MODEL_B, MODEL_C],
         quorum: 2,

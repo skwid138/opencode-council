@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createChildSession,
   extractLatestAssistantText,
-  parentDirectory,
   promptAndExtract,
 } from "./session";
 import type { ReviewState } from "./types";
+import { createV1Host } from "./v1";
 
 function createSessionMocks() {
   return {
@@ -67,23 +67,86 @@ describe("extractLatestAssistantText", () => {
   });
 });
 
-describe("parentDirectory", () => {
-  it("uses the parent session directory when available", async () => {
-    const session = createSessionMocks();
-    session.get.mockResolvedValueOnce({ data: { directory: "/resolved-parent" } });
+// E3: a V1 assistant message the host marked as errored is a failure, even with partial text.
+const PARTIAL = "PARTIAL-SECRET-TEXT";
+const HOSTILE_ERROR = {
+  name: "HOSTILE-NAME",
+  data: {
+    message: "HOSTILE-MESSAGE",
+    responseHeaders: { authorization: "Bearer HOSTILE-HEADER" },
+    responseBody: "HOSTILE-BODY",
+    metadata: { url: "HOSTILE-METADATA" },
+  },
+};
+const HOSTILE_STRINGS = [PARTIAL, "HOSTILE-NAME", "HOSTILE-MESSAGE", "HOSTILE-HEADER", "HOSTILE-BODY", "HOSTILE-METADATA"];
 
-    await expect(parentDirectory(createContext(session) as never, "parent")).resolves.toBe(
-      "/resolved-parent",
-    );
+function assistant(created: number, text: string | null, error?: unknown) {
+  return {
+    info: { role: "assistant", time: { created }, ...(error === undefined ? {} : { error }) },
+    parts: text === null ? [] : [{ type: "text", text }],
+  };
+}
+
+/** The thrown error is exactly the fixed literal: no host error fields, no partial text, nothing attached. */
+function expectFixedAssistantError(error: unknown) {
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe("assistant error: failed");
+  expect((error as Error).cause).toBeUndefined();
+  expect(Object.keys(error as object)).toEqual([]);
+  const rendered = `${String(error)} ${JSON.stringify(error)} ${(error as Error).stack ?? ""}`;
+  for (const hostile of HOSTILE_STRINGS) expect(rendered).not.toContain(hostile);
+}
+
+describe("E3: V1 failed-assistant classification", () => {
+  it("(a) messages only: the newest assistant has partial text and a named info.error -> assistant error: failed (clean prompt)", async () => {
+    const session = createSessionMocks();
+    session.prompt.mockResolvedValueOnce({});
+    session.messages.mockResolvedValueOnce({ data: [assistant(1, PARTIAL, HOSTILE_ERROR)] });
+
+    const error = await promptAndExtract(createV1Host(createContext(session) as never), { sessionID: "child", agent: "reviewer", prompt: "review this" }).catch((caught: unknown) => caught);
+    expectFixedAssistantError(error);
   });
 
-  it("falls back to the plugin directory when parent lookup fails", async () => {
+  it("(b) prompt only: a successful prompt response whose assistant info.error is set fails even when messages are clean", async () => {
     const session = createSessionMocks();
-    session.get.mockRejectedValueOnce(new Error("not found"));
+    session.prompt.mockResolvedValueOnce({ data: { info: { role: "assistant", time: { created: 2 }, error: HOSTILE_ERROR }, parts: [{ type: "text", text: PARTIAL }] } });
+    session.messages.mockResolvedValueOnce({ data: assistantMessages("clean response") });
 
-    await expect(parentDirectory(createContext(session) as never, "parent")).resolves.toBe(
-      "/fallback-directory",
-    );
+    const error = await promptAndExtract(createV1Host(createContext(session) as never), { sessionID: "child", agent: "reviewer", prompt: "review this" }).catch((caught: unknown) => caught);
+    expectFixedAssistantError(error);
+    // Short-circuit: the failed prompt response is decisive; messages are never read.
+    expect(session.messages).not.toHaveBeenCalled();
+  });
+
+  it("prompt responses without data, with a null error, or from a non-assistant info stay compatible", async () => {
+    for (const promptResult of [{}, { data: { info: { role: "assistant", error: null }, parts: [] } }, { data: { info: { role: "assistant" }, parts: [] } }, { data: { info: { role: "user", error: HOSTILE_ERROR } } }]) {
+      const session = createSessionMocks();
+      session.prompt.mockResolvedValueOnce(promptResult);
+      session.messages.mockResolvedValueOnce({ data: assistantMessages("clean response") });
+      await expect(promptAndExtract(createV1Host(createContext(session) as never), { sessionID: "child", agent: "reviewer", prompt: "p" })).resolves.toBe("clean response");
+    }
+  });
+
+  it("null / absent errors succeed; an error object without data.message is still caught", () => {
+    expect(extractLatestAssistantText([assistant(1, "ok", null)])).toBe("ok");
+    expect(extractLatestAssistantText([assistant(1, "ok")])).toBe("ok");
+    let error: unknown;
+    try {
+      extractLatestAssistantText([assistant(1, PARTIAL, { name: "APIError" })]);
+    } catch (caught) {
+      error = caught;
+    }
+    expectFixedAssistantError(error);
+  });
+
+  it("unsorted arrays, distinct timestamps: the newest assistant decides (no backtracking)", () => {
+    // older clean / newer failed -> rejects (never falls back to the older clean reply)
+    expect(() => extractLatestAssistantText([assistant(9, PARTIAL, HOSTILE_ERROR), assistant(1, "older clean")])).toThrow(/^assistant error: failed$/);
+    expect(() => extractLatestAssistantText([assistant(1, "older clean"), assistant(9, PARTIAL, HOSTILE_ERROR)])).toThrow(/^assistant error: failed$/);
+    // older failed / newer clean -> succeeds
+    expect(extractLatestAssistantText([assistant(9, "newer clean"), assistant(1, PARTIAL, HOSTILE_ERROR)])).toBe("newer clean");
+    // newer empty / older good -> still empty (unchanged)
+    expect(extractLatestAssistantText([assistant(1, "older good"), assistant(9, null)])).toBeNull();
   });
 });
 
@@ -99,7 +162,7 @@ describe("createChildSession", () => {
 
     await expect(
       createChildSession(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         "parent",
         "title",
         "/dir",
@@ -124,7 +187,7 @@ describe("createChildSession", () => {
 
     await expect(
       createChildSession(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         "parent",
         "title",
         "/dir",
@@ -149,7 +212,7 @@ describe("createChildSession", () => {
 
     await expect(
       createChildSession(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         "parent",
         "title",
         "/dir",
@@ -166,13 +229,13 @@ describe("createChildSession", () => {
     const errorSession = createSessionMocks();
     errorSession.create.mockResolvedValueOnce({ error: "create failed" });
     await expect(
-      createChildSession(createContext(errorSession) as never, "parent", "title", "/dir"),
+      createChildSession(createV1Host(createContext(errorSession) as never), "parent", "title", "/dir"),
     ).rejects.toThrow("failed to create child session: create failed");
 
     const missingSession = createSessionMocks();
     missingSession.create.mockResolvedValueOnce({ data: {} });
     await expect(
-      createChildSession(createContext(missingSession) as never, "parent", "title", "/dir"),
+      createChildSession(createV1Host(createContext(missingSession) as never), "parent", "title", "/dir"),
     ).rejects.toThrow("failed to create child session: missing session id");
   });
 
@@ -181,7 +244,7 @@ describe("createChildSession", () => {
     session.create.mockResolvedValueOnce({ error: new StructuredError("create boom", "E_CREATE") });
 
     await expect(
-      createChildSession(createContext(session) as never, "parent", "title", "/dir"),
+      createChildSession(createV1Host(createContext(session) as never), "parent", "title", "/dir"),
     ).rejects.toThrow('failed to create child session: create boom {"code":"E_CREATE"} (json)');
   });
 
@@ -190,7 +253,7 @@ describe("createChildSession", () => {
     session.create.mockResolvedValueOnce({ error: { code: "E_CREATE" } });
 
     await expect(
-      createChildSession(createContext(session) as never, "parent", "title", "/dir"),
+      createChildSession(createV1Host(createContext(session) as never), "parent", "title", "/dir"),
     ).rejects.toThrow('failed to create child session: {"code":"E_CREATE"}');
   });
 
@@ -209,7 +272,7 @@ describe("createChildSession", () => {
 
     await expect(
       createChildSession(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         "parent",
         "title",
         "/dir",
@@ -230,7 +293,7 @@ describe("createChildSession", () => {
 
     await expect(
       createChildSession(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         "parent",
         "title",
         "/dir",
@@ -252,7 +315,7 @@ describe("promptAndExtract", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
 
     await expect(
-      promptAndExtract(createContext(session) as never, {
+      promptAndExtract(createV1Host(createContext(session) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -277,7 +340,7 @@ describe("promptAndExtract", () => {
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
 
-    await promptAndExtract(createContext(session) as never, {
+    await promptAndExtract(createV1Host(createContext(session) as never), {
       sessionID: "child",
       agent: "reviewer",
       prompt: "review this",
@@ -296,7 +359,7 @@ describe("promptAndExtract", () => {
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
 
-    await promptAndExtract(createContext(session) as never, {
+    await promptAndExtract(createV1Host(createContext(session) as never), {
       sessionID: "child",
       agent: "aggregator",
       prompt: "aggregate this",
@@ -315,7 +378,7 @@ describe("promptAndExtract", () => {
     session.prompt.mockResolvedValueOnce({});
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
 
-    await promptAndExtract(createContext(session) as never, {
+    await promptAndExtract(createV1Host(createContext(session) as never), {
       sessionID: "child",
       agent: "aggregator",
       prompt: "aggregate this",
@@ -330,7 +393,7 @@ describe("promptAndExtract", () => {
     const promptFailure = createSessionMocks();
     promptFailure.prompt.mockResolvedValueOnce({ error: "bad prompt" });
     await expect(
-      promptAndExtract(createContext(promptFailure) as never, {
+      promptAndExtract(createV1Host(createContext(promptFailure) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -341,7 +404,7 @@ describe("promptAndExtract", () => {
     messagesFailure.prompt.mockResolvedValueOnce({});
     messagesFailure.messages.mockResolvedValueOnce({ error: "bad messages" });
     await expect(
-      promptAndExtract(createContext(messagesFailure) as never, {
+      promptAndExtract(createV1Host(createContext(messagesFailure) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -352,7 +415,7 @@ describe("promptAndExtract", () => {
     emptyFailure.prompt.mockResolvedValueOnce({});
     emptyFailure.messages.mockResolvedValueOnce({ data: [] });
     await expect(
-      promptAndExtract(createContext(emptyFailure) as never, {
+      promptAndExtract(createV1Host(createContext(emptyFailure) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -365,7 +428,7 @@ describe("promptAndExtract", () => {
     session.prompt.mockResolvedValueOnce({ error: new StructuredError("prompt boom", "E_PROMPT") });
 
     await expect(
-      promptAndExtract(createContext(session) as never, {
+      promptAndExtract(createV1Host(createContext(session) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -378,7 +441,7 @@ describe("promptAndExtract", () => {
     session.prompt.mockResolvedValueOnce({ error: { code: "E_PROMPT" } });
 
     await expect(
-      promptAndExtract(createContext(session) as never, {
+      promptAndExtract(createV1Host(createContext(session) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -392,7 +455,7 @@ describe("promptAndExtract", () => {
     session.messages.mockResolvedValueOnce({ error: new StructuredError("messages boom", "E_MESSAGES") });
 
     await expect(
-      promptAndExtract(createContext(session) as never, {
+      promptAndExtract(createV1Host(createContext(session) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",
@@ -406,7 +469,7 @@ describe("promptAndExtract", () => {
     session.messages.mockResolvedValueOnce({ error: { code: "E_MESSAGES" } });
 
     await expect(
-      promptAndExtract(createContext(session) as never, {
+      promptAndExtract(createV1Host(createContext(session) as never), {
         sessionID: "child",
         agent: "agent",
         prompt: "review this",

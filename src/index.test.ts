@@ -72,8 +72,13 @@ function createContext(appLog = vi.fn(async () => ({}))) {
 
 describe("plugin module shape", () => {
   it("default export preserves the server property", () => {
-    expect(defaultExport).toEqual({ server: CouncilToolPlugin });
+    expect(defaultExport).toEqual({
+      id: "skwid138.opencode-council",
+      server: CouncilToolPlugin,
+      setup: expect.any(Function),
+    });
     expect(typeof defaultExport.server).toBe("function");
+    expect(typeof defaultExport.setup).toBe("function");
   });
 
   it("server function returns config hook and council_review tool", async () => {
