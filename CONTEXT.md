@@ -17,11 +17,11 @@ The agent that synthesizes councillor responses into deduplicated findings by ag
 _Avoid_: Synthesizer, merger
 
 **Bundled agent**:
-A default agent injected via config hook when the user doesn't specify a custom agent. Namespaced as `council-plugin-reviewer` or `council-plugin-aggregator`.
+A default agent injected via the config hook (V1) or an `agent.transform` upsert (V2) when the user doesn't specify a custom agent. Namespaced as `council-plugin-reviewer` or `council-plugin-aggregator`.
 _Avoid_: Default agent, built-in agent
 
 **Config hook injection**:
-The pattern of injecting agent definitions at plugin startup via the opencode config hook, rather than installing files or passing inline prompts.
+**V1:** The pattern of injecting agent definitions at plugin startup via the opencode config hook, rather than installing files or passing inline prompts.
 _Avoid_: Dynamic registration, runtime injection
 
 **Models array**:
@@ -41,11 +41,11 @@ The shorter timeout budget for optional councillors, configured via `council.tim
 _Avoid_: optional retry timeout, straggler timeout
 
 **Permission override**:
-User-specified permissions (`reviewer_permission`, `aggregator_permission`) that layer on top of the active agent's permissions, whether bundled or user-specified. Applied as the highest-priority rules in last-match-wins evaluation.
+User-specified permissions (`reviewer_permission`, `aggregator_permission`) that layer on top of the active agent's permissions, whether bundled or user-specified. Applied as the highest-priority rules in last-match-wins evaluation, except the final `council_review` deny, which always comes after them. On V1, `aggregator_permission` is currently ineffective: the aggregator's create-time rules are replaced at prompt time by its tools map (#50).
 _Avoid_: Permission config, custom permissions
 
 **Structured log**:
-Plugin diagnostics written via `ctx.client.app.log()` to opencode's log system. TUI-safe and persisted to `~/.local/share/opencode/log/`.
+**V1:** Plugin diagnostics written via `ctx.client.app.log()` to opencode's log system. TUI-safe and persisted to `~/.local/share/opencode/log/`. V2 logs metadata-only console lines plus an optional debug file.
 _Avoid_: console output, stderr logging
 
 **Phase timeout**:
@@ -57,19 +57,32 @@ The default hard cap derived from `councillor + aggregator + quorum_grace + 30s 
 _Avoid_: auto timeout, dynamic cap
 
 **#28037 workaround (catch-all allows)**:
-Child sessions cannot prompt the user interactively (anomalyco/opencode#28037) — `ask` permissions hang the TUI. The plugin prepends catch-all `{bash, *, allow}` and `{external_directory, *, allow}` rules as the lowest-priority base. Workspace `ask` values are stripped by `workspacePatternRules` before layering, so `ask` cannot re-emerge. This is intentionally permissive; workspace deny rules restrict access back down.
+**V1 only.** Child sessions could not prompt the user interactively (anomalyco/opencode#28037) — `ask` permissions hung the TUI. The plugin prepends catch-all `{bash, *, allow}` and `{external_directory, *, allow}` rules as the lowest-priority base. Workspace `ask` values are stripped by `workspacePatternRules` before layering, so `ask` cannot re-emerge. This is intentionally permissive; workspace deny rules restrict access back down. Upstream #28037 is fixed (V1 1.17.7); the workaround is retained unchanged pending a retest (#45). V2 does not use it; see **Ask denial**.
 
 **Permission layering**:
-Child-session permission rulesets are constructed in append order. OpenCode evaluates rules last-match-wins (confirmed in opencode source `config.ts`):
+**V1:** Child-session permission rulesets are constructed in append order. OpenCode evaluates rules last-match-wins (confirmed in opencode source `config.ts`):
 1. Catch-all allows (#28037 workaround) — lowest priority
 2. Workspace deny/allow rules (from cached permission's `bash` and `external_directory`; `ask` values stripped)
-3. User `reviewer_permission` / `aggregator_permission` overrides — highest priority
+3. User `reviewer_permission` overrides
+4. Final `council_review` deny (**recursion guard**) — cannot be overridden
+
+This is the reviewer sequence. The V1 aggregator gets only its `aggregator_permission` rules (if any), with no catch-all allows, workspace rules, or final deny; at prompt time its tools map replaces those rules (#50) and is also its recursion protection.
+
+**V2:** see **V2 child permission composition**.
+
+**V2 child permission composition**:
+Reviewer child session rules = the parent session's deny rules (in order) → council denies (`edit`, `subagent`, `question`, `todowrite`) → translated `reviewer_permission` (V1 names renamed, e.g. `bash` → `shell`) → final `council_review` deny. Aggregator child = parent session deny rules → `*` deny → translated `aggregator_permission` → final `council_review` deny. Council adds nothing broader than the parent session on its own (parent allows are dropped, parent denies kept), but explicit overrides are trusted grants and can re-allow a parent deny; only the final `council_review` deny cannot be overridden. The parent's agent restrictions are not inherited.
+_Avoid_: inherited permissions, permission copy
+
+**Ask denial**:
+On V2, a permission evaluate hook converts any remaining `ask` to `deny` for **council-owned children**, so no child waits on a prompt nobody can answer. Saved "always" approvals still apply; evaluate hooks registered later by other plugins can override it (#43).
+_Avoid_: ask stripping (the V1 parse-time behavior)
 
 **Cached permission**:
-Workspace permission config captured from the config hook at plugin startup. The config hook is guaranteed to run before any tool execution, so this value is always populated when `buildReviewerRuleset` is called. OpenCode does not hot-reload config; the value remains valid for the plugin's lifetime.
+**V1 only.** Workspace permission config captured from the config hook at plugin startup. The config hook is guaranteed to run before any tool execution, so this value is always populated when `buildReviewerRuleset` is called. OpenCode does not hot-reload config; the value remains valid for the plugin's lifetime. V2 reads the parent session's permissions per review.
 
 **Active session tracking**:
-A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by the hard-cap timeout to abort all in-flight sessions, and by the quorum-abort sweep to terminate still-pending councillors once `quorum` required successes have been reached. Abort calls are fire-and-forget and idempotent — double-aborts are tolerated.
+A `Set<string>` of child session IDs maintained during a council review. Sessions are added after creation and removed on completion. Used by the hard-cap timeout to abort all in-flight sessions, and by the quorum-abort sweep to terminate still-pending councillors once `quorum` required successes have been reached. On V1, abort calls are fire-and-forget and idempotent — double-aborts are tolerated. On V2, cancellation and cleanup stops are bounded waits (interrupt, then wait, up to a deadline); repeated stops of the same child are tolerated.
 
 **Quorum**:
 The number of successful **required councillor** responses required before the aggregator can run early. Configured via `council.quorum`; valid range is `[2, requiredCount]`, where `requiredCount` excludes optional councillors. Default is `requiredCount` (wait-for-all-required). Optional councillor successes do not increment quorum, but they still count toward the tier-blind two-success floor for aggregator fallback behavior.
@@ -87,14 +100,27 @@ _Avoid_: cleanup, cancellation
 A councillor whose session was terminated by the laggard abort sweep because quorum was reached without it. Tracked separately from failures and timeouts as `CouncillorAborted = { model }`. Rendered in the aggregator prompt under a conditional `"## Aborted (quorum reached)"` section; the section is omitted entirely when no councillors were aborted, preserving byte-identical aggregator prompt behavior in the default (`quorum === models.length`) configuration.
 _Avoid_: cancelled councillor, timed-out councillor, failed councillor
 
+**Cancellation sweep**:
+The orchestrator-level operation triggered when the parent `council_review` tool call is cancelled (host abort signal). Marks the review cancelled, requests a stop for every tracked child session (detached: V1 `session.abort`; V2 `interrupt` then a wait bounded to 5 s, which may end unconfirmed), and stops late-created children as soon as they exist. Returns the cancellation result without waiting for stop confirmation; the aggregator does not start, and a running one is stopped.
+_Avoid_: abort cascade, teardown
+
+**Council-owned child**:
+A child session created by this plugin instance, owned until its stop is confirmed or plugin cleanup clears ownership. Ownership drives **ask denial** and the **recursion guard**.
+_Avoid_: tracked session (that is the per-review **Active session tracking**)
+
+**Recursion guard**:
+On both hosts, `council_review` is refused at execution when the caller is a **council-owned child**. It is also hidden by a final deny rule from reviewer children (both hosts) and the V2 aggregator, and from the V1 aggregator by its prompt tools map.
+_Avoid_: depth limit
+
 ## Relationships
 
 - A **council_review** invocation spawns one **councillor** per entry in the **models array**.
 - Each **councillor** executes the **reviewer agent** (bundled or user-specified).
 - The **aggregator agent** receives all councillor responses and produces deduplicated findings.
-- **Permission overrides** layer on top of the active agent's permissions (bundled or user-specified) as the highest-priority rules.
+- **Permission overrides** layer on top of the active agent's permissions (bundled or user-specified) as the highest-priority rules, except the final `council_review` deny.
 - The **hard cap** wraps the entire operation as a safety net; **phase timeouts** govern individual phases independently with fresh clocks.
 - When **quorum** is reached by required councillors before all councillors respond, the orchestrator optionally waits up to the **quorum grace window**, then runs the **laggard abort sweep** to terminate still-pending councillor sessions. Each terminated session becomes an **aborted councillor** in the aggregator's participation summary.
+- Every child the plugin creates is a **council-owned child** until its stop is confirmed or plugin cleanup clears ownership; ownership is what **ask denial** (V2) and the **recursion guard** (both hosts) key on.
 
 ## Example dialogue
 
