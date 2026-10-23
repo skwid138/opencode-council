@@ -1,6 +1,6 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 
-import type { ModelConfig } from "./types";
+import type { ModelConfig } from "./types.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -100,7 +100,7 @@ function unserializableErrorName(error: object): string {
   }
 }
 
-export function createLogger(ctx: PluginInput, debugEnabled: boolean): Logger {
+export function createLogger(ctx: Pick<PluginInput, "client">, debugEnabled: boolean): Logger {
   return (level, message, extra) => {
     if (level === "debug" && !debugEnabled) return;
     const body: {

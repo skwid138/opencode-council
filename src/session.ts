@@ -1,11 +1,11 @@
-import { errorMessage } from "./logging";
-import type {
-  CouncilPluginContext,
-  ModelConfig,
-  PermissionRuleset,
-  ReviewState,
-} from "./types";
+import { awaitStop, CouncilCancelledError, raceCancellation } from "./cancellation.js";
+import type { ChildPermission, CouncilHost, RunChildInput } from "./host.js";
+import type { ModelConfig, ReviewState } from "./types.js";
 
+/**
+ * Extract the newest assistant message's text parts from a V1 `session.messages`
+ * payload. Pure; used by the V1 host's `runChild`.
+ */
 export function extractLatestAssistantText(messages: unknown): string | null {
   if (!Array.isArray(messages) || messages.length === 0) return null;
 
@@ -31,6 +31,12 @@ export function extractLatestAssistantText(messages: unknown): string | null {
   const lastMessage = assistantMessages[0];
   if (!lastMessage) return null;
 
+  // E3: the newest assistant message decides. A host-marked error fails it even
+  // when it carries partial text (no backtracking to an older reply). The host
+  // error is never copied into the thrown error.
+  const lastError = (lastMessage.info as Record<string, unknown>).error;
+  if (lastError !== null && lastError !== undefined) throw new Error("assistant error: failed");
+
   const parts = lastMessage.parts as Array<Record<string, unknown>> | undefined;
   if (!Array.isArray(parts)) return null;
 
@@ -43,113 +49,85 @@ export function extractLatestAssistantText(messages: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
-export async function parentDirectory(
-  ctx: CouncilPluginContext,
-  sessionID: string,
-): Promise<string> {
-  const parentSession = await ctx.client.session
-    .get({ path: { id: sessionID } })
-    .catch(() => null);
-  return parentSession?.data?.directory ?? ctx.directory;
-}
+/**
+ * Per-attempt state shared by a councillor/aggregator attempt and its phase
+ * timeout callback. `expired` is set when the phase timeout fires.
+ */
+export type AttemptState = { expired: boolean };
 
 export async function createChildSession(
-  ctx: CouncilPluginContext,
+  host: CouncilHost,
   parentSessionID: string,
   title: string,
   directory: string,
-  permission?: PermissionRuleset,
+  permission?: ChildPermission,
   reviewState?: ReviewState,
   abortIfQuorumReached: boolean = false,
+  identity?: { agent: string; model?: ModelConfig },
+  attempt?: AttemptState,
 ): Promise<string> {
   if (reviewState?.hardCapTimedOut) {
     throw new Error("council_review hard cap already triggered");
   }
+  const cancellation = reviewState?.cancellation;
+  if (cancellation?.cancelled) throw new CouncilCancelledError();
 
-  const body: Record<string, unknown> = {
+  const created = host.createChild({
     parentID: parentSessionID,
     title,
-  };
-  if (permission) body.permission = permission;
+    directory,
+    ...(permission ? { permission } : {}),
+    ...(identity ? { agent: identity.agent } : {}),
+    ...(identity?.model ? { model: identity.model } : {}),
+  });
 
-  const createResult = await ctx.client.session.create({
-    body,
-    query: { directory },
-  } as Parameters<typeof ctx.client.session.create>[0]) as {
-    data?: { id?: string };
-    error?: unknown;
-  };
-
-  if (createResult.error) {
-    throw new Error(`failed to create child session: ${errorMessage(createResult.error)}`);
-  }
-
-  const sessionID = createResult.data?.id;
-  if (!sessionID) {
-    throw new Error("failed to create child session: missing session id");
+  let sessionID: string;
+  try {
+    sessionID = await raceCancellation(created, cancellation);
+  } catch (error) {
+    if (cancellation?.cancelled) {
+      // Cancelled while create was pending: a child created late stops itself
+      // (detached, same sweep deadline). A late create failure is swallowed.
+      created.then(
+        (lateSessionID) => {
+          void host.stopChild(lateSessionID, { deadline: cancellation.stopDeadline });
+        },
+        () => {},
+      );
+    }
+    throw error;
   }
 
   reviewState?.activeSessions.add(sessionID);
+  if (attempt?.expired) {
+    // The phase timeout already fired (and returned its result) while create
+    // was pending, so the timeout callback had no id to stop. Stop the late
+    // child now, detached, and never prompt it.
+    reviewState?.activeSessions.delete(sessionID);
+    void host.stopChild(sessionID); // detached (see host.ts table)
+    throw new Error("child session created after its phase timeout; stopped without prompting");
+  }
+  if (cancellation?.cancelled) {
+    reviewState?.activeSessions.delete(sessionID);
+    void host.stopChild(sessionID, { deadline: cancellation.stopDeadline }); // detached (see host.ts table)
+    throw new CouncilCancelledError();
+  }
+
   if (reviewState?.hardCapTimedOut) {
     reviewState.activeSessions.delete(sessionID);
-    await ctx.client.session
-      .abort({ path: { id: sessionID } })
-      .catch(() => {});
+    await awaitStop(host.stopChild(sessionID), cancellation); // awaited (see host.ts table)
     throw new Error("council_review hard cap already triggered");
   }
 
   if (abortIfQuorumReached && reviewState?.quorumReached) {
     reviewState.activeSessions.delete(sessionID);
-    void ctx.client.session
-      .abort({ path: { id: sessionID } })
-      .catch(() => {});
+    void host.stopChild(sessionID); // detached (see host.ts table)
     throw new Error("Council quorum reached; aborting late reviewer session.");
   }
 
   return sessionID;
 }
 
-export async function promptAndExtract(
-  ctx: CouncilPluginContext,
-  input: {
-    sessionID: string;
-    agent: string;
-    prompt: string;
-    model?: ModelConfig;
-    tools?: Record<string, boolean>;
-  },
-): Promise<string> {
-  const body: Record<string, unknown> = {
-    agent: input.agent,
-    parts: [{ type: "text", text: input.prompt }],
-  };
-
-  if (input.model) {
-    body.model = { providerID: input.model.providerID, modelID: input.model.modelID };
-  }
-  if (input.tools) body.tools = input.tools;
-
-  const promptResult = await ctx.client.session.prompt({
-    path: { id: input.sessionID },
-    body,
-  } as Parameters<typeof ctx.client.session.prompt>[0]) as { error?: unknown };
-
-  if (promptResult.error) {
-    throw new Error(`prompt failed: ${errorMessage(promptResult.error)}`);
-  }
-
-  const messagesResult = await ctx.client.session.messages({
-    path: { id: input.sessionID },
-  }) as { data?: unknown; error?: unknown };
-
-  if (messagesResult.error) {
-    throw new Error(`failed to get messages: ${errorMessage(messagesResult.error)}`);
-  }
-
-  const responseText = extractLatestAssistantText(messagesResult.data);
-  if (!responseText) {
-    throw new Error("empty response");
-  }
-
-  return responseText;
+export function promptAndExtract(host: CouncilHost, input: RunChildInput): Promise<string> {
+  return host.runChild(input);
 }

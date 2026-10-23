@@ -1,9 +1,7 @@
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { Cancellation } from "./cancellation.js";
 
 export const BUNDLED_REVIEWER_AGENT = "council-plugin-reviewer";
 export const BUNDLED_AGGREGATOR_AGENT = "council-plugin-aggregator";
-
-export type CouncilPluginContext = Pick<PluginInput, "client" | "directory">;
 
 export type CouncilPluginOptions = {
   council?: Record<string, unknown>;
@@ -66,6 +64,8 @@ export type ReviewState = {
   activeSessions: Set<string>;
   hardCapTimedOut: boolean;
   quorumReached: boolean;
+  /** Present only when the review has a host abort signal. */
+  cancellation?: Cancellation;
 };
 
 export function isModelConfig(value: unknown): value is ModelConfig {

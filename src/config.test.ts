@@ -736,3 +736,58 @@ describe("composeCouncilConfig", () => {
     );
   });
 });
+
+describe("permission override ask handling", () => {
+  it("strips ask overrides by default (V1) and keeps them when requested (V2)", () => {
+    const raw = {
+      council: {
+        models: [MODEL_A, { providerID: "provider-b", modelID: "model-b" }],
+        reviewer_permission: { bash: { "git push*": "ask", "*": "allow" }, question: "ask" },
+        aggregator_permission: { webfetch: "ask" },
+      },
+    };
+    const warn = vi.fn();
+
+    const v1 = composeCouncilConfig(raw, warn);
+    expect(v1.reviewer_permission).toEqual({ bash: { "*": "allow" } });
+    expect(v1.aggregator_permission).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(3);
+
+    const keepWarn = vi.fn();
+    const v2 = composeCouncilConfig(raw, keepWarn, { overrideAsk: "keep" });
+    expect(v2.reviewer_permission).toEqual({
+      bash: { "git push*": "ask", "*": "allow" },
+      question: "ask",
+    });
+    expect(Object.keys((v2.reviewer_permission as Record<string, Record<string, string>>).bash))
+      .toEqual(["git push*", "*"]);
+    expect(v2.aggregator_permission).toEqual({ webfetch: "ask" });
+    expect(keepWarn).not.toHaveBeenCalled();
+  });
+});
+
+describe("invalid quorum warning value description", () => {
+  it("keeps the raw JSON value in the V1 (default) warning text", () => {
+    const warn = vi.fn();
+
+    parseCouncilConfig({ council: validCouncil({ models: models(2), quorum: { value: "raw" } }) }, warn);
+
+    expect(warn).toHaveBeenCalledWith(
+      'Invalid council.quorum: {"value":"raw"}. Must be integer in [2, 2]. Falling back to 2.',
+    );
+  });
+
+  it("describes the value by type only when requested (V2)", () => {
+    const warn = vi.fn();
+
+    parseCouncilConfig(
+      { council: validCouncil({ models: models(2), quorum: { value: "raw" } }) },
+      warn,
+      { describeValue: "type" },
+    );
+
+    expect(warn).toHaveBeenCalledWith(
+      "Invalid council.quorum: <object>. Must be integer in [2, 2]. Falling back to 2.",
+    );
+  });
+});

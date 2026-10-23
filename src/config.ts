@@ -1,4 +1,4 @@
-import { readPermissionOverride } from "./permissions";
+import { type OverrideAskHandling, readPermissionOverride } from "./permissions.js";
 import {
   BUNDLED_AGGREGATOR_AGENT,
   BUNDLED_REVIEWER_AGENT,
@@ -8,7 +8,7 @@ import {
   type ModelConfig,
   type TimeoutConfig,
   type WarningLogger,
-} from "./types";
+} from "./types.js";
 
 export const COUNCILLOR_TIMEOUT_MS = 270_000;
 export const OPTIONAL_COUNCILLOR_TIMEOUT_MS = 60_000;
@@ -146,9 +146,28 @@ function readOptionalCouncillorMs(
   return councillorMs;
 }
 
+export type ParseCouncilConfigOptions = {
+  /** `ask` handling for permission overrides; defaults to "strip" (V1). */
+  overrideAsk?: OverrideAskHandling;
+  /**
+   * How user-supplied values appear in warning MESSAGE text. "raw" (V1 default)
+   * keeps the existing JSON text; "type" (V2) prints only a type tag such as
+   * `<object>`, so host consoles/log files never receive raw config values.
+   */
+  describeValue?: "raw" | "type";
+};
+
+function describeConfigValue(value: unknown, mode: "raw" | "type" = "raw"): string {
+  if (mode === "raw") return JSON.stringify(value);
+  if (value === null) return "<null>";
+  if (Array.isArray(value)) return "<array>";
+  return `<${typeof value}>`;
+}
+
 export function parseCouncilConfig(
   raw: unknown,
   warn: WarningLogger = () => {},
+  options: ParseCouncilConfigOptions = {},
 ): Omit<CouncilConfig, "debug"> {
   const source = councilOptions(raw);
   const timeoutSource = isPlainObject(source.timeouts) ? source.timeouts : {};
@@ -223,7 +242,7 @@ export function parseCouncilConfig(
     }
     if (raw !== undefined) {
       warn(
-        `Invalid council.quorum: ${JSON.stringify(raw)}. Must be integer in [2, ${requiredCount}]. Falling back to ${requiredCount}.`,
+        `Invalid council.quorum: ${describeConfigValue(raw, options.describeValue)}. Must be integer in [2, ${requiredCount}]. Falling back to ${requiredCount}.`,
       );
     }
     return requiredCount;
@@ -236,8 +255,16 @@ export function parseCouncilConfig(
     quorum,
     aggregator_model: aggregatorModel,
     reviewer_temperature: readReviewerTemperature(source),
-    reviewer_permission: readPermissionOverride(source.reviewer_permission, warn),
-    aggregator_permission: readPermissionOverride(source.aggregator_permission, warn),
+    reviewer_permission: readPermissionOverride(
+      source.reviewer_permission,
+      warn,
+      options.overrideAsk,
+    ),
+    aggregator_permission: readPermissionOverride(
+      source.aggregator_permission,
+      warn,
+      options.overrideAsk,
+    ),
     timeouts: {
       councillor_ms: councillorMs,
       optional_councillor_ms: optionalCouncillorMs,
@@ -251,6 +278,7 @@ export function parseCouncilConfig(
 export function composeCouncilConfig(
   raw: unknown,
   warn: WarningLogger = () => {},
+  options: ParseCouncilConfigOptions = {},
 ): CouncilConfig {
-  return { ...parseCouncilConfig(raw, warn), debug: resolveDebug(raw) };
+  return { ...parseCouncilConfig(raw, warn, options), debug: resolveDebug(raw) };
 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { runCouncillor, runCouncillorAttempt } from "./councillor";
 import type { CouncilConfig, ReviewState } from "./types";
+import { createV1Host } from "./v1";
 
 const MODEL_A = { providerID: "provider-a", modelID: "model-a" };
 const MODEL_B = { providerID: "provider-b", modelID: "model-b" };
@@ -92,7 +93,7 @@ describe("runCouncillorAttempt", () => {
     };
 
     await expect(
-      runCouncillorAttempt(createContext(session) as never, councilConfig(), vi.fn(), {
+      runCouncillorAttempt(createV1Host(createContext(session) as never), councilConfig(), vi.fn(), {
         parentSessionID: "parent",
         prompt: "review this",
         model: MODEL_A,
@@ -130,7 +131,7 @@ describe("runCouncillorAttempt", () => {
     session.messages.mockResolvedValue({ data: assistantMessages("late response") });
 
     await expect(
-      runCouncillorAttempt(createContext(session) as never, councilConfig(), log, {
+      runCouncillorAttempt(createV1Host(createContext(session) as never), councilConfig(), log, {
         parentSessionID: "parent",
         prompt: "review this",
         model: MODEL_A,
@@ -158,7 +159,7 @@ describe("runCouncillorAttempt", () => {
     session.messages.mockResolvedValue({ data: assistantMessages("late response") });
 
     const resultPromise = runCouncillorAttempt(
-      createContext(session) as never,
+      createV1Host(createContext(session) as never),
       councilConfig(),
       vi.fn(),
       {
@@ -190,7 +191,7 @@ describe("runCouncillor", () => {
     session.messages.mockResolvedValueOnce({ data: assistantMessages("response") });
 
     await expect(
-      runCouncillor(createContext(session) as never, councilConfig(), vi.fn(), {
+      runCouncillor(createV1Host(createContext(session) as never), councilConfig(), vi.fn(), {
         parentSessionID: "parent",
         prompt: "review this",
         model: MODEL_A,
@@ -207,7 +208,7 @@ describe("runCouncillor", () => {
     session.prompt.mockResolvedValueOnce({ error: "single failed" });
 
     await expect(
-      runCouncillor(createContext(session) as never, councilConfig(), vi.fn(), {
+      runCouncillor(createV1Host(createContext(session) as never), councilConfig(), vi.fn(), {
         parentSessionID: "parent",
         prompt: "review this",
         model: MODEL_A,
@@ -230,7 +231,7 @@ describe("runCouncillor", () => {
 
     await expect(
       runCouncillor(
-        createContext(session) as never,
+        createV1Host(createContext(session) as never),
         councilConfig({
           timeouts: {
             ...councilConfig().timeouts,
@@ -268,7 +269,7 @@ describe("runCouncillor", () => {
     };
 
     await expect(
-      runCouncillor(createContext(session) as never, councilConfig(), vi.fn(), {
+      runCouncillor(createV1Host(createContext(session) as never), councilConfig(), vi.fn(), {
         parentSessionID: "parent",
         prompt: "review this",
         model: MODEL_A,
@@ -278,5 +279,43 @@ describe("runCouncillor", () => {
       }),
     ).rejects.toThrow("council_review hard cap already triggered");
     expect(session.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("late child after the councillor phase timeout", () => {
+  it("never prompts a child whose create resolves after the timeout, and requests its stop (detached)", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createSessionMocks();
+      const lateCreate = deferred<{ data: { id: string } }>();
+      session.create.mockReturnValueOnce(lateCreate.promise);
+      session.prompt.mockResolvedValue({});
+      session.messages.mockResolvedValue({ data: assistantMessages("late response") });
+      session.abort.mockImplementation(() => new Promise(() => {}));
+      const reviewState: ReviewState = { activeSessions: new Set(), hardCapTimedOut: false, quorumReached: false };
+
+      const result = runCouncillorAttempt(createV1Host(createContext(session) as never), councilConfig(), vi.fn(), {
+        parentSessionID: "parent",
+        prompt: "review this",
+        model: MODEL_A,
+        timeoutMs: 50,
+        directory: "/dir",
+        reviewerPermission: [],
+        reviewState,
+      });
+      const observed = result.catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await observed).toMatchObject({ message: "provider-a/model-a timed out after 0s" });
+
+      lateCreate.resolve({ data: { id: "late-session" } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.prompt).not.toHaveBeenCalled();
+      expect(session.messages).not.toHaveBeenCalled();
+      expect(session.abort).toHaveBeenCalledWith({ path: { id: "late-session" } });
+      expect(reviewState.activeSessions.has("late-session")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
